@@ -1,18 +1,19 @@
 """Base index classes."""
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generic, List, Optional, Sequence, Type, TypeVar
+from typing import Any, Dict, Generic, List, Optional, Sequence, Type, TypeVar, cast
 
 from llama_index.chat_engine.types import BaseChatEngine, ChatMode
+from llama_index.core.base_query_engine import BaseQueryEngine
+from llama_index.core.base_retriever import BaseRetriever
 from llama_index.data_structs.data_structs import IndexStruct
-from llama_index.indices.base_retriever import BaseRetriever
-from llama_index.indices.query.base import BaseQueryEngine
-from llama_index.indices.service_context import ServiceContext
-from llama_index.schema import Document
-from llama_index.schema import BaseNode
+from llama_index.ingestion import run_transformations
+from llama_index.llms.openai import OpenAI
+from llama_index.llms.openai_utils import is_function_calling_model
+from llama_index.schema import BaseNode, Document, IndexNode
+from llama_index.service_context import ServiceContext
 from llama_index.storage.docstore.types import BaseDocumentStore, RefDocInfo
 from llama_index.storage.storage_context import StorageContext
-from llama_index.token_counter.token_counter import llm_token_counter
 
 IS = TypeVar("IS", bound=IndexStruct)
 IndexType = TypeVar("IndexType", bound="BaseIndex")
@@ -25,8 +26,9 @@ class BaseIndex(Generic[IS], ABC):
 
     Args:
         nodes (List[Node]): List of nodes to index
+        show_progress (bool): Whether to show tqdm progress bars. Defaults to False.
         service_context (ServiceContext): Service context container (contains
-            components like LLMPredictor, PromptHelper, etc.).
+            components like LLM, Embeddings, etc.).
 
     """
 
@@ -35,14 +37,16 @@ class BaseIndex(Generic[IS], ABC):
     def __init__(
         self,
         nodes: Optional[Sequence[BaseNode]] = None,
+        objects: Optional[Sequence[IndexNode]] = None,
         index_struct: Optional[IS] = None,
         storage_context: Optional[StorageContext] = None,
         service_context: Optional[ServiceContext] = None,
+        show_progress: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize with parameters."""
-        if index_struct is None and nodes is None:
-            raise ValueError("One of nodes or index_struct must be provided.")
+        if index_struct is None and nodes is None and objects is None:
+            raise ValueError("One of nodes, objects, or index_struct must be provided.")
         if index_struct is not None and nodes is not None:
             raise ValueError("Only one of nodes or index_struct can be provided.")
         # This is to explicitly make sure that the old UX is not used
@@ -59,13 +63,18 @@ class BaseIndex(Generic[IS], ABC):
         self._service_context = service_context or ServiceContext.from_defaults()
         self._storage_context = storage_context or StorageContext.from_defaults()
         self._docstore = self._storage_context.docstore
+        self._show_progress = show_progress
         self._vector_store = self._storage_context.vector_store
         self._graph_store = self._storage_context.graph_store
 
+        objects = objects or []
+        self._object_map = {obj.index_id: obj.obj for obj in objects}
         with self._service_context.callback_manager.as_trace("index_construction"):
             if index_struct is None:
-                assert nodes is not None
-                index_struct = self.build_index_from_nodes(nodes)
+                nodes = nodes or []
+                index_struct = self.build_index_from_nodes(
+                    nodes + objects  # type: ignore
+                )
             self._index_struct = index_struct
             self._storage_context.index_store.add_index_struct(self._index_struct)
 
@@ -75,6 +84,7 @@ class BaseIndex(Generic[IS], ABC):
         documents: Sequence[Document],
         storage_context: Optional[StorageContext] = None,
         service_context: Optional[ServiceContext] = None,
+        show_progress: bool = False,
         **kwargs: Any,
     ) -> IndexType:
         """Create index from documents.
@@ -91,12 +101,19 @@ class BaseIndex(Generic[IS], ABC):
         with service_context.callback_manager.as_trace("index_construction"):
             for doc in documents:
                 docstore.set_document_hash(doc.get_doc_id(), doc.hash)
-            nodes = service_context.node_parser.get_nodes_from_documents(documents)
+
+            nodes = run_transformations(
+                documents,  # type: ignore
+                service_context.transformations,
+                show_progress=show_progress,
+                **kwargs,
+            )
 
             return cls(
                 nodes=nodes,
                 storage_context=storage_context,
                 service_context=service_context,
+                show_progress=show_progress,
                 **kwargs,
             )
 
@@ -158,7 +175,6 @@ class BaseIndex(Generic[IS], ABC):
     def _build_index_from_nodes(self, nodes: Sequence[BaseNode]) -> IS:
         """Build the index from nodes."""
 
-    @llm_token_counter("build_index_from_nodes")
     def build_index_from_nodes(self, nodes: Sequence[BaseNode]) -> IS:
         """Build the index from nodes."""
         self._docstore.add_documents(nodes, allow_update=True)
@@ -168,7 +184,6 @@ class BaseIndex(Generic[IS], ABC):
     def _insert(self, nodes: Sequence[BaseNode], **insert_kwargs: Any) -> None:
         """Index-specific logic for inserting nodes to the index struct."""
 
-    @llm_token_counter("insert")
     def insert_nodes(self, nodes: Sequence[BaseNode], **insert_kwargs: Any) -> None:
         """Insert nodes."""
         with self._service_context.callback_manager.as_trace("insert_nodes"):
@@ -179,9 +194,12 @@ class BaseIndex(Generic[IS], ABC):
     def insert(self, document: Document, **insert_kwargs: Any) -> None:
         """Insert a document."""
         with self._service_context.callback_manager.as_trace("insert"):
-            nodes = self.service_context.node_parser.get_nodes_from_documents(
-                [document]
+            nodes = run_transformations(
+                [document],
+                self._service_context.transformations,
+                show_progress=self._show_progress,
             )
+
             self.insert_nodes(nodes, **insert_kwargs)
             self.docstore.set_document_hash(document.get_doc_id(), document.hash)
 
@@ -270,7 +288,9 @@ class BaseIndex(Generic[IS], ABC):
         """
         with self._service_context.callback_manager.as_trace("update"):
             self.delete_ref_doc(
-                document.get_doc_id(), **update_kwargs.pop("delete_kwargs", {})
+                document.get_doc_id(),
+                delete_from_docstore=True,
+                **update_kwargs.pop("delete_kwargs", {}),
             )
             self.insert(document, **update_kwargs.pop("insert_kwargs", {}))
 
@@ -304,13 +324,13 @@ class BaseIndex(Generic[IS], ABC):
                 existing_doc_hash = self._docstore.get_document_hash(
                     document.get_doc_id()
                 )
-                if existing_doc_hash != document.hash:
+                if existing_doc_hash is None:
+                    self.insert(document, **update_kwargs.pop("insert_kwargs", {}))
+                    refreshed_documents[i] = True
+                elif existing_doc_hash != document.hash:
                     self.update_ref_doc(
                         document, **update_kwargs.pop("update_kwargs", {})
                     )
-                    refreshed_documents[i] = True
-                elif existing_doc_hash is None:
-                    self.insert(document, **update_kwargs.pop("insert_kwargs", {}))
                     refreshed_documents[i] = True
 
             return refreshed_documents
@@ -323,7 +343,7 @@ class BaseIndex(Generic[IS], ABC):
 
     @abstractmethod
     def as_retriever(self, **kwargs: Any) -> BaseRetriever:
-        pass
+        ...
 
     def as_query_engine(self, **kwargs: Any) -> BaseQueryEngine:
         # NOTE: lazy import
@@ -337,26 +357,77 @@ class BaseIndex(Generic[IS], ABC):
         return RetrieverQueryEngine.from_args(**kwargs)
 
     def as_chat_engine(
-        self, chat_mode: ChatMode = ChatMode.CONDENSE_QUESTION, **kwargs: Any
+        self, chat_mode: ChatMode = ChatMode.BEST, **kwargs: Any
     ) -> BaseChatEngine:
+        query_engine = self.as_query_engine(**kwargs)
+        if "service_context" not in kwargs:
+            kwargs["service_context"] = self._service_context
+
+        # resolve chat mode
+        if chat_mode == ChatMode.BEST:
+            # get LLM
+            service_context = cast(ServiceContext, kwargs["service_context"])
+            llm = service_context.llm
+
+            if isinstance(llm, OpenAI) and is_function_calling_model(llm.model):
+                chat_mode = ChatMode.OPENAI
+            else:
+                chat_mode = ChatMode.REACT
+
         if chat_mode == ChatMode.CONDENSE_QUESTION:
             # NOTE: lazy import
             from llama_index.chat_engine import CondenseQuestionChatEngine
 
-            query_engine = self.as_query_engine(**kwargs)
             return CondenseQuestionChatEngine.from_defaults(
                 query_engine=query_engine,
-                service_context=self.service_context,
                 **kwargs,
             )
-        elif chat_mode == ChatMode.REACT:
-            # NOTE: lazy import
-            from llama_index.chat_engine import ReActChatEngine
+        elif chat_mode == ChatMode.CONTEXT:
+            from llama_index.chat_engine import ContextChatEngine
 
-            query_engine = self.as_query_engine(**kwargs)
-            return ReActChatEngine.from_query_engine(
-                query_engine=query_engine,
-                service_context=self.service_context,
+            return ContextChatEngine.from_defaults(
+                retriever=self.as_retriever(**kwargs),
+                **kwargs,
+            )
+
+        elif chat_mode == ChatMode.CONDENSE_PLUS_CONTEXT:
+            from llama_index.chat_engine import CondensePlusContextChatEngine
+
+            return CondensePlusContextChatEngine.from_defaults(
+                retriever=self.as_retriever(**kwargs),
+                **kwargs,
+            )
+
+        elif chat_mode in [ChatMode.REACT, ChatMode.OPENAI]:
+            # NOTE: lazy import
+            from llama_index.agent import OpenAIAgent, ReActAgent
+            from llama_index.tools.query_engine import QueryEngineTool
+
+            # convert query engine to tool
+            query_engine_tool = QueryEngineTool.from_defaults(query_engine=query_engine)
+
+            # get LLM
+            service_context = cast(ServiceContext, kwargs.pop("service_context"))
+            llm = service_context.llm
+
+            if chat_mode == ChatMode.REACT:
+                return ReActAgent.from_tools(
+                    tools=[query_engine_tool],
+                    llm=llm,
+                    **kwargs,
+                )
+            elif chat_mode == ChatMode.OPENAI:
+                return OpenAIAgent.from_tools(
+                    tools=[query_engine_tool],
+                    llm=llm,
+                    **kwargs,
+                )
+            else:
+                raise ValueError(f"Unknown chat mode: {chat_mode}")
+        elif chat_mode == ChatMode.SIMPLE:
+            from llama_index.chat_engine import SimpleChatEngine
+
+            return SimpleChatEngine.from_defaults(
                 **kwargs,
             )
         else:

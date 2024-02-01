@@ -3,27 +3,71 @@
 from typing import List
 
 import pytest
-
 from llama_index.embeddings.base import BaseEmbedding
-from llama_index.indices.list.base import ListIndex
-from llama_index.indices.service_context import ServiceContext
+from llama_index.indices.list.base import SummaryIndex
 from llama_index.indices.tree.base import TreeIndex
 from llama_index.indices.vector_store.base import VectorStoreIndex
 from llama_index.playground import DEFAULT_INDEX_CLASSES, DEFAULT_MODES, Playground
 from llama_index.schema import Document
+from llama_index.service_context import ServiceContext
 
 
 class MockEmbedding(BaseEmbedding):
-    def _get_text_embedding(self, text: str) -> List[float]:
-        """Mock get text embedding."""
+    @classmethod
+    def class_name(cls) -> str:
+        return "MockEmbedding"
+
+    async def _aget_query_embedding(self, query: str) -> List[float]:
+        del query
+        return [0, 0, 1, 0, 0]
+
+    async def _aget_text_embedding(self, text: str) -> List[float]:
+        text = text.strip()
         # assume dimensions are 5
         if text == "They're taking the Hobbits to Isengard!":
             return [1, 0, 0, 0, 0]
+        elif (
+            text == "They're taking the Hobbits to Isengard! I can't carry it for you."
+        ):
+            return [1, 1, 0, 0, 0]
+        elif (
+            text
+            == "They're taking the Hobbits to Isengard! I can't carry it for you. But I can carry you!"
+        ):
+            return [1, 1, 1, 0, 0]
         elif text == "I can't carry it for you.":
             return [0, 1, 0, 0, 0]
+        elif text == "I can't carry it for you. But I can carry you!":
+            return [0, 1, 1, 0, 0]
         elif text == "But I can carry you!":
             return [0, 0, 1, 0, 0]
         else:
+            print(text)
+            raise ValueError(f"Invalid text for `mock_get_text_embedding`.")
+
+    def _get_text_embedding(self, text: str) -> List[float]:
+        """Mock get text embedding."""
+        text = text.strip()
+        # assume dimensions are 5
+        if text == "They're taking the Hobbits to Isengard!":
+            return [1, 0, 0, 0, 0]
+        elif (
+            text == "They're taking the Hobbits to Isengard! I can't carry it for you."
+        ):
+            return [1, 1, 0, 0, 0]
+        elif (
+            text
+            == "They're taking the Hobbits to Isengard! I can't carry it for you. But I can carry you!"
+        ):
+            return [1, 1, 1, 0, 0]
+        elif text == "I can't carry it for you.":
+            return [0, 1, 0, 0, 0]
+        elif text == "I can't carry it for you. But I can carry you!":
+            return [0, 1, 1, 0, 0]
+        elif text == "But I can carry you!":
+            return [0, 0, 1, 0, 0]
+        else:
+            print(text)
             raise ValueError("Invalid text for `mock_get_text_embedding`.")
 
     def _get_query_embedding(self, query: str) -> List[float]:
@@ -43,7 +87,7 @@ def test_get_set_compare(
         VectorStoreIndex.from_documents(
             documents=documents, service_context=mock_service_context
         ),
-        ListIndex.from_documents(documents, service_context=mock_service_context),
+        SummaryIndex.from_documents(documents, service_context=mock_service_context),
         TreeIndex.from_documents(
             documents=documents, service_context=mock_service_context
         ),
@@ -97,7 +141,9 @@ def test_validation() -> None:
         _ = Playground(indices=["VectorStoreIndex"])  # type: ignore
 
     with pytest.raises(ValueError):
-        _ = Playground(indices=[VectorStoreIndex, ListIndex, TreeIndex])  # type: ignore
+        _ = Playground(
+            indices=[VectorStoreIndex, SummaryIndex, TreeIndex]  # type: ignore
+        )
 
     with pytest.raises(ValueError):
         _ = Playground(indices=[])  # type: ignore

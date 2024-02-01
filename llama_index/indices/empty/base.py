@@ -7,12 +7,12 @@ pure LLM calls.
 
 from typing import Any, Dict, Optional, Sequence
 
+from llama_index.core.base_query_engine import BaseQueryEngine
+from llama_index.core.base_retriever import BaseRetriever
 from llama_index.data_structs.data_structs import EmptyIndexStruct
 from llama_index.indices.base import BaseIndex
-from llama_index.indices.base_retriever import BaseRetriever
-from llama_index.indices.query.base import BaseQueryEngine
-from llama_index.indices.service_context import ServiceContext
 from llama_index.schema import BaseNode
+from llama_index.service_context import ServiceContext
 from llama_index.storage.docstore.types import RefDocInfo
 
 
@@ -65,11 +65,10 @@ class EmptyIndex(BaseIndex[EmptyIndexStruct]):
             documents (List[BaseDocument]): A list of documents.
 
         Returns:
-            IndexList: The created list index.
+            IndexList: The created summary index.
         """
         del nodes  # Unused
-        index_struct = EmptyIndexStruct()
-        return index_struct
+        return EmptyIndexStruct()
 
     def _insert(self, nodes: Sequence[BaseNode], **insert_kwargs: Any) -> None:
         """Insert a document."""

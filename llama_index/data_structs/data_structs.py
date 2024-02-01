@@ -11,9 +11,8 @@ from typing import Dict, List, Optional, Sequence, Set
 
 from dataclasses_json import DataClassJsonMixin
 
-from llama_index.schema import BaseNode, TextNode
 from llama_index.data_structs.struct_type import IndexStructType
-
+from llama_index.schema import BaseNode, TextNode
 
 # TODO: legacy backport of old Node class
 Node = TextNode
@@ -201,6 +200,16 @@ class IndexDict(IndexStruct):
     def get_type(cls) -> IndexStructType:
         """Get type."""
         return IndexStructType.VECTOR_STORE
+
+
+@dataclass
+class MultiModelIndexDict(IndexDict):
+    """A simple dictionary of documents, but loads a MultiModelVectorStore."""
+
+    @classmethod
+    def get_type(cls) -> IndexStructType:
+        """Get type."""
+        return IndexStructType.MULTIMODAL_VECTOR_STORE
 
 
 @dataclass

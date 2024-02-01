@@ -1,29 +1,29 @@
-"""Pinecone Vector store index.
+"""
+Pinecone Vector store index.
 
-An index that that is built on top of an existing vector store.
+An index that is built on top of an existing vector store.
 
 """
-
 import logging
-import os
 from collections import Counter
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, cast
 
-from llama_index.schema import MetadataMode, TextNode
+from llama_index.bridge.pydantic import PrivateAttr
+from llama_index.schema import BaseNode, MetadataMode, TextNode
+from llama_index.vector_stores.pinecone_utils import _import_pinecone, _is_pinecone_v3
 from llama_index.vector_stores.types import (
+    BasePydanticVectorStore,
     MetadataFilters,
-    NodeWithEmbedding,
-    VectorStore,
     VectorStoreQuery,
     VectorStoreQueryMode,
     VectorStoreQueryResult,
 )
 from llama_index.vector_stores.utils import (
     DEFAULT_TEXT_KEY,
+    legacy_metadata_dict_to_node,
     metadata_dict_to_node,
     node_to_metadata_dict,
-    legacy_metadata_dict_to_node,
 )
 
 ID_KEY = "id"
@@ -34,6 +34,38 @@ METADATA_KEY = "metadata"
 DEFAULT_BATCH_SIZE = 100
 
 _logger = logging.getLogger(__name__)
+
+
+def _transform_pinecone_filter_condition(condition: str) -> str:
+    """Translate standard metadata filter op to Pinecone specific spec."""
+    if condition == "and":
+        return "$and"
+    elif condition == "or":
+        return "$or"
+    else:
+        raise ValueError(f"Filter condition {condition} not supported")
+
+
+def _transform_pinecone_filter_operator(operator: str) -> str:
+    """Translate standard metadata filter operator to Pinecone specific spec."""
+    if operator == "!=":
+        return "$ne"
+    elif operator == "==":
+        return "$eq"
+    elif operator == ">":
+        return "$gt"
+    elif operator == "<":
+        return "$lt"
+    elif operator == ">=":
+        return "$gte"
+    elif operator == "<=":
+        return "$lte"
+    elif operator == "in":
+        return "$in"
+    elif operator == "nin":
+        return "$nin"
+    else:
+        raise ValueError(f"Filter operator {operator} not supported")
 
 
 def build_dict(input_batch: List[List[int]]) -> List[Dict[str, Any]]:
@@ -69,8 +101,7 @@ def generate_sparse_vectors(
     # create batch of input_ids
     inputs = tokenizer(context_batch)["input_ids"]
     # create sparse dictionaries
-    sparse_embeds = build_dict(inputs)
-    return sparse_embeds
+    return build_dict(inputs)
 
 
 def get_default_tokenizer() -> Callable:
@@ -83,24 +114,49 @@ def get_default_tokenizer() -> Callable:
 
     orig_tokenizer = BertTokenizerFast.from_pretrained("bert-base-uncased")
     # set some default arguments, so input is just a list of strings
-    tokenizer = partial(
+    return partial(
         orig_tokenizer,
         padding=True,
         truncation=True,
         max_length=512,
     )
-    return tokenizer
 
 
 def _to_pinecone_filter(standard_filters: MetadataFilters) -> dict:
     """Convert from standard dataclass to pinecone filter dict."""
     filters = {}
-    for filter in standard_filters.filters:
-        filters[filter.key] = filter.value
+    filters_list = []
+    condition = standard_filters.condition or "and"
+    condition = _transform_pinecone_filter_condition(condition)
+    if standard_filters.filters:
+        for filter in standard_filters.filters:
+            if filter.operator:
+                filters_list.append(
+                    {
+                        filter.key: {
+                            _transform_pinecone_filter_operator(
+                                filter.operator
+                            ): filter.value
+                        }
+                    }
+                )
+            else:
+                filters_list.append({filter.key: filter.value})
+
+    if len(filters_list) == 1:
+        # If there is only one filter, return it directly
+        return filters_list[0]
+    elif len(filters_list) > 1:
+        filters[condition] = filters_list
     return filters
 
 
-class PineconeVectorStore(VectorStore):
+import_err_msg = (
+    "`pinecone` package not found, please run `pip install pinecone-client`"
+)
+
+
+class PineconeVectorStore(BasePydanticVectorStore):
     """Pinecone Vector Store.
 
     In this vector store, embeddings and docs are stored within a
@@ -110,19 +166,39 @@ class PineconeVectorStore(VectorStore):
     k most similar nodes.
 
     Args:
-        pinecone_index (Optional[pinecone.Index]): Pinecone index instance
+        pinecone_index (Optional[Union[pinecone.Pinecone.Index, pinecone.Index]]): Pinecone index instance,
+        pinecone.Pinecone.Index for clients >= 3.0.0; pinecone.Index for older clients.
         insert_kwargs (Optional[Dict]): insert kwargs during `upsert` call.
         add_sparse_vector (bool): whether to add sparse vector to index.
         tokenizer (Optional[Callable]): tokenizer to use to generate sparse
+        default_empty_query_vector (Optional[List[float]]): default empty query vector.
+            Defaults to None. If not None, then this vector will be used as the query
+            vector if the query is empty.
 
     """
 
     stores_text: bool = True
-    flat_metadata: bool = True
+    flat_metadata: bool = False
+
+    api_key: Optional[str]
+    index_name: Optional[str]
+    environment: Optional[str]
+    namespace: Optional[str]
+    insert_kwargs: Optional[Dict]
+    add_sparse_vector: bool
+    text_key: str
+    batch_size: int
+    remove_text_from_metadata: bool
+
+    _pinecone_index: Any = PrivateAttr()
+    _tokenizer: Optional[Callable] = PrivateAttr()
 
     def __init__(
         self,
-        pinecone_index: Optional[Any] = None,
+        pinecone_index: Optional[
+            Any
+        ] = None,  # Dynamic import prevents specific type hinting here
+        api_key: Optional[str] = None,
         index_name: Optional[str] = None,
         environment: Optional[str] = None,
         namespace: Optional[str] = None,
@@ -131,72 +207,138 @@ class PineconeVectorStore(VectorStore):
         tokenizer: Optional[Callable] = None,
         text_key: str = DEFAULT_TEXT_KEY,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        remove_text_from_metadata: bool = False,
+        default_empty_query_vector: Optional[List[float]] = None,
         **kwargs: Any,
     ) -> None:
-        """Initialize params."""
-        import_err_msg = (
-            "`pinecone` package not found, please run `pip install pinecone-client`"
-        )
-        try:
-            import pinecone  # noqa: F401
-        except ImportError:
-            raise ImportError(import_err_msg)
+        insert_kwargs = insert_kwargs or {}
 
-        self._index_name = index_name
-        self._environment = environment
-        self._namespace = namespace
-        if pinecone_index is not None:
-            self._pinecone_index = cast(pinecone.Index, pinecone_index)
-        else:
-            if "PINECONE_API_KEY" not in os.environ:
-                raise ValueError(
-                    "Must specify PINECONE_API_KEY via env variable "
-                    "if not directly passing in client."
-                )
-            if index_name is None or environment is None:
-                raise ValueError(
-                    "Must specify index_name and environment "
-                    "if not directly passing in client."
-                )
-
-            pinecone.init(environment=environment)
-            self._pinecone_index = pinecone.Index(index_name)
-
-        self._insert_kwargs = insert_kwargs or {}
-
-        self._add_sparse_vector = add_sparse_vector
-        if tokenizer is None:
+        if tokenizer is None and add_sparse_vector:
             tokenizer = get_default_tokenizer()
         self._tokenizer = tokenizer
-        self._text_key = text_key
-        self._batch_size = batch_size
+
+        super().__init__(
+            index_name=index_name,
+            environment=environment,
+            api_key=api_key,
+            namespace=namespace,
+            insert_kwargs=insert_kwargs,
+            add_sparse_vector=add_sparse_vector,
+            text_key=text_key,
+            batch_size=batch_size,
+            remove_text_from_metadata=remove_text_from_metadata,
+        )
+
+        # TODO: Make following instance check stronger -- check if pinecone_index is not pinecone.Index, else raise
+        #  ValueError
+        if isinstance(pinecone_index, str):
+            raise ValueError(
+                f"`pinecone_index` cannot be of type `str`; should be an instance of pinecone.Index, "
+            )
+
+        self._pinecone_index = pinecone_index or self._initialize_pinecone_client(
+            api_key, index_name, environment, **kwargs
+        )
+
+    @classmethod
+    def _initialize_pinecone_client(
+        cls,
+        api_key: Optional[str],
+        index_name: Optional[str],
+        environment: Optional[str],
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Initialize Pinecone client based on version.
+
+        If client version <3.0.0, use pods-based initialization; else, use serverless initialization.
+        """
+        if not index_name:
+            raise ValueError(
+                "`index_name` is required for Pinecone client initialization"
+            )
+
+        pinecone = _import_pinecone()
+
+        if (
+            not _is_pinecone_v3()
+        ):  # If old version of Pinecone client (version bifurcation temporary):
+            if not environment:
+                raise ValueError("environment is required for Pinecone client < 3.0.0")
+            pinecone.init(api_key=api_key, environment=environment)
+            return pinecone.Index(index_name)
+        else:  # If new version of Pinecone client (serverless):
+            pinecone_instance = pinecone.Pinecone(api_key=api_key)
+            return pinecone_instance.Index(index_name)
+
+    @classmethod
+    def from_params(
+        cls,
+        api_key: Optional[str] = None,
+        index_name: Optional[str] = None,
+        environment: Optional[str] = None,
+        namespace: Optional[str] = None,
+        insert_kwargs: Optional[Dict] = None,
+        add_sparse_vector: bool = False,
+        tokenizer: Optional[Callable] = None,
+        text_key: str = DEFAULT_TEXT_KEY,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        remove_text_from_metadata: bool = False,
+        default_empty_query_vector: Optional[List[float]] = None,
+        **kwargs: Any,
+    ) -> "PineconeVectorStore":
+        pinecone_index = cls._initialize_pinecone_client(
+            api_key, index_name, environment, **kwargs
+        )
+
+        return cls(
+            pinecone_index=pinecone_index,
+            api_key=api_key,
+            index_name=index_name,
+            environment=environment,
+            namespace=namespace,
+            insert_kwargs=insert_kwargs,
+            add_sparse_vector=add_sparse_vector,
+            tokenizer=tokenizer,
+            text_key=text_key,
+            batch_size=batch_size,
+            remove_text_from_metadata=remove_text_from_metadata,
+            default_empty_query_vector=default_empty_query_vector,
+            **kwargs,
+        )
+
+    @classmethod
+    def class_name(cls) -> str:
+        return "PinconeVectorStore"
 
     def add(
         self,
-        embedding_results: List[NodeWithEmbedding],
+        nodes: List[BaseNode],
+        **add_kwargs: Any,
     ) -> List[str]:
-        """Add embedding results to index.
+        """Add nodes to index.
 
-        Args
-            embedding_results: List[NodeWithEmbedding]: list of embedding results
+        Args:
+            nodes: List[BaseNode]: list of nodes with embeddings
 
         """
         ids = []
         entries = []
-        for result in embedding_results:
-            node_id = result.id
-            node = result.node
+        for node in nodes:
+            node_id = node.node_id
 
             metadata = node_to_metadata_dict(
-                node, remove_text=False, flat_metadata=self.flat_metadata
+                node,
+                remove_text=self.remove_text_from_metadata,
+                flat_metadata=self.flat_metadata,
             )
 
             entry = {
                 ID_KEY: node_id,
-                VECTOR_KEY: result.embedding,
+                VECTOR_KEY: node.get_embedding(),
                 METADATA_KEY: metadata,
             }
-            if self._add_sparse_vector:
+            if self.add_sparse_vector and self._tokenizer is not None:
                 sparse_vector = generate_sparse_vectors(
                     [node.get_content(metadata_mode=MetadataMode.EMBED)],
                     self._tokenizer,
@@ -207,9 +349,9 @@ class PineconeVectorStore(VectorStore):
             entries.append(entry)
         self._pinecone_index.upsert(
             entries,
-            namespace=self._namespace,
-            batch_size=self._batch_size,
-            **self._insert_kwargs,
+            namespace=self.namespace,
+            batch_size=self.batch_size,
+            **self.insert_kwargs,
         )
         return ids
 
@@ -224,7 +366,7 @@ class PineconeVectorStore(VectorStore):
         # delete by filtering on the doc_id metadata
         self._pinecone_index.delete(
             filter={"doc_id": {"$eq": ref_doc_id}},
-            namespace=self._namespace,
+            namespace=self.namespace,
             **delete_kwargs,
         )
 
@@ -242,7 +384,10 @@ class PineconeVectorStore(VectorStore):
 
         """
         sparse_vector = None
-        if query.mode in (VectorStoreQueryMode.SPARSE, VectorStoreQueryMode.HYBRID):
+        if (
+            query.mode in (VectorStoreQueryMode.SPARSE, VectorStoreQueryMode.HYBRID)
+            and self._tokenizer is not None
+        ):
             if query.query_str is None:
                 raise ValueError(
                     "query_str must be specified if mode is SPARSE or HYBRID."
@@ -263,13 +408,15 @@ class PineconeVectorStore(VectorStore):
                 query_embedding = [v * query.alpha for v in query_embedding]
 
         if query.filters is not None:
-            if "filter" in kwargs:
+            if "filter" in kwargs or "pinecone_query_filters" in kwargs:
                 raise ValueError(
                     "Cannot specify filter via both query and kwargs. "
                     "Use kwargs only for pinecone specific items that are "
                     "not supported via the generic query interface."
                 )
             filter = _to_pinecone_filter(query.filters)
+        elif "pinecone_query_filters" in kwargs:
+            filter = kwargs.pop("pinecone_query_filters")
         else:
             filter = kwargs.pop("filter", {})
 
@@ -279,7 +426,7 @@ class PineconeVectorStore(VectorStore):
             top_k=query.similarity_top_k,
             include_values=True,
             include_metadata=True,
-            namespace=self._namespace,
+            namespace=self.namespace,
             filter=filter,
             **kwargs,
         )
@@ -290,16 +437,17 @@ class PineconeVectorStore(VectorStore):
         for match in response.matches:
             try:
                 node = metadata_dict_to_node(match.metadata)
+                node.embedding = match.values
             except Exception:
                 # NOTE: deprecated legacy logic for backward compatibility
                 _logger.debug(
                     "Failed to parse Node metadata, fallback to legacy logic."
                 )
                 metadata, node_info, relationships = legacy_metadata_dict_to_node(
-                    match.metadata, text_key=self._text_key
+                    match.metadata, text_key=self.text_key
                 )
 
-                text = match.metadata[self._text_key]
+                text = match.metadata[self.text_key]
                 id = match.id
                 node = TextNode(
                     text=text,

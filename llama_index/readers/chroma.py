@@ -12,7 +12,7 @@ class ChromaReader(BaseReader):
     Retrieve documents from existing persisted Chroma collections.
 
     Args:
-        collection_name: Name of the peristed collection.
+        collection_name: Name of the persisted collection.
         persist_directory: Directory where the collection is persisted.
 
     """
@@ -31,25 +31,23 @@ class ChromaReader(BaseReader):
             "`chromadb` package not found, please run `pip install chromadb`"
         )
         try:
-            import chromadb  # noqa: F401
+            import chromadb
         except ImportError:
             raise ImportError(import_err_msg)
 
         if collection_name is None:
             raise ValueError("Please provide a collection name.")
-        from chromadb.config import Settings
+        # from chromadb.config import Settings
 
-        self._client = chromadb.Client(
-            Settings(
-                chroma_api_impl=chroma_api_impl,
-                chroma_db_impl=chroma_db_impl or "chromadb.db.duckdb.DuckDB",
-                chroma_server_host=host,
-                chroma_server_http_port=port,
-                persist_directory=persist_directory
-                if persist_directory
-                else "./chroma",
+        if persist_directory is not None:
+            self._client = chromadb.PersistentClient(
+                path=persist_directory if persist_directory else "./chroma",
             )
-        )
+        elif (host is not None) or (port is not None):
+            self._client = chromadb.HttpClient(
+                host=host,
+                port=port,
+            )
 
         self._collection = self._client.get_collection(collection_name)
 
@@ -64,16 +62,16 @@ class ChromaReader(BaseReader):
         """
         documents = []
         for result in zip(
-            results["ids"],
-            results["documents"],
-            results["embeddings"],
-            results["metadatas"],
+            results["ids"][0],
+            results["documents"][0],
+            results["embeddings"][0],
+            results["metadatas"][0],
         ):
             document = Document(
-                id_=result[0][0],
-                text=result[1][0],
-                embedding=result[2][0],
-                metadata=result[3][0],
+                id_=result[0],
+                text=result[1],
+                embedding=result[2],
+                metadata=result[3],
             )
             documents.append(document)
 

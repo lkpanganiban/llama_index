@@ -1,9 +1,18 @@
 import json
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
-from llama_index.schema import BaseNode, NodeRelationship, RelatedNodeInfo, TextNode
+from llama_index.schema import (
+    BaseNode,
+    ImageNode,
+    IndexNode,
+    NodeRelationship,
+    RelatedNodeInfo,
+    TextNode,
+)
 
 DEFAULT_TEXT_KEY = "text"
+DEFAULT_EMBEDDING_KEY = "embedding"
+DEFAULT_DOC_ID_KEY = "doc_id"
 
 
 def _validate_is_flat_dict(metadata_dict: dict) -> None:
@@ -25,23 +34,24 @@ def node_to_metadata_dict(
     remove_text: bool = False,
     text_field: str = DEFAULT_TEXT_KEY,
     flat_metadata: bool = False,
-) -> dict:
+) -> Dict[str, Any]:
     """Common logic for saving Node data into metadata dict."""
-    metadata: Dict[str, Any] = node.metadata
+    node_dict = node.dict()
+    metadata: Dict[str, Any] = node_dict.get("metadata", {})
 
     if flat_metadata:
         _validate_is_flat_dict(metadata)
 
     # store entire node as json string - some minor text duplication
-    node_dict = node.dict()
     if remove_text:
         node_dict[text_field] = ""
 
     # remove embedding from node_dict
     node_dict["embedding"] = None
 
-    # dump remainer of node_dict to json string
+    # dump remainder of node_dict to json string
     metadata["_node_content"] = json.dumps(node_dict)
+    metadata["_node_type"] = node.class_name()
 
     # store ref doc id at top level to allow metadata filtering
     # kept for backwards compatibility, will consolidate in future
@@ -52,13 +62,25 @@ def node_to_metadata_dict(
     return metadata
 
 
-def metadata_dict_to_node(metadata: dict) -> TextNode:
+def metadata_dict_to_node(metadata: dict, text: Optional[str] = None) -> BaseNode:
     """Common logic for loading Node data from metadata dict."""
     node_json = metadata.get("_node_content", None)
+    node_type = metadata.get("_node_type", None)
     if node_json is None:
         raise ValueError("Node content not found in metadata dict.")
 
-    return TextNode.parse_raw(node_json)
+    node: BaseNode
+    if node_type == IndexNode.class_name():
+        node = IndexNode.parse_raw(node_json)
+    elif node_type == ImageNode.class_name():
+        node = ImageNode.parse_raw(node_json)
+    else:
+        node = TextNode.parse_raw(node_json)
+
+    if text is not None:
+        node.set_content(text)
+
+    return node
 
 
 # TODO: Deprecated conversion functions
@@ -67,7 +89,10 @@ def legacy_metadata_dict_to_node(
 ) -> Tuple[dict, dict, dict]:
     """Common logic for loading Node data from metadata dict."""
     # make a copy first
-    metadata = metadata.copy()
+    if metadata is None:
+        metadata = {}
+    else:
+        metadata = metadata.copy()
 
     # load node_info from json string
     node_info_str = metadata.pop("node_info", "")
@@ -89,19 +114,29 @@ def legacy_metadata_dict_to_node(
 
     # remove other known fields
     metadata.pop(text_key, None)
-    metadata.pop("id", None)
-    metadata.pop("document_id", None)
-    metadata.pop("doc_id", None)
-    metadata.pop("ref_doc_id", None)
+
+    id_ = metadata.pop("id", None)
+    document_id = metadata.pop("document_id", None)
+    doc_id = metadata.pop("doc_id", None)
+    ref_doc_id = metadata.pop("ref_doc_id", None)
+
+    # don't remove id's from metadata that llama-index doesn't know about
+    ref_doc_id_info = relationships.get(NodeRelationship.PARENT, None)
+    if ref_doc_id_info is not None:
+        ref_doc_id = ref_doc_id_info.node_id
+
+    if id_ is not None and id_ != ref_doc_id:
+        metadata["id"] = id_
+    if document_id is not None and document_id != ref_doc_id:
+        metadata["document_id"] = document_id
+    if doc_id is not None and doc_id != ref_doc_id:
+        metadata["doc_id"] = doc_id
 
     # remaining metadata is metadata or node_info
-    metadata = {}
+    new_metadata = {}
     for key, val in metadata.items():
-        # NOTE: right now we enforce metadata to be dict of simple types.
-        #       dump anything that's not a simple type into node_info.
-        if isinstance(val, (str, int, float, type(None))):
-            metadata[key] = val
-        else:
-            node_info[key] = val
+        # don't enforce types on metadata anymore (we did in the past)
+        # since how we store this data now has been updated
+        new_metadata[key] = val
 
-    return metadata, node_info, relationships
+    return new_metadata, node_info, relationships

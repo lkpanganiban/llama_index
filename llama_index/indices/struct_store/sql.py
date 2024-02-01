@@ -1,21 +1,22 @@
 """SQL Structured Store."""
+from collections import defaultdict
 from enum import Enum
 from typing import Any, Optional, Sequence, Union
 
-from collections import defaultdict
+from sqlalchemy import Table
+
+from llama_index.core.base_query_engine import BaseQueryEngine
+from llama_index.core.base_retriever import BaseRetriever
 from llama_index.data_structs.table import SQLStructTable
-from llama_index.indices.base_retriever import BaseRetriever
 from llama_index.indices.common.struct_store.schema import SQLContextContainer
 from llama_index.indices.common.struct_store.sql import SQLStructDatapointExtractor
-from llama_index.indices.query.base import BaseQueryEngine
-from llama_index.indices.service_context import ServiceContext
 from llama_index.indices.struct_store.base import BaseStructStoreIndex
 from llama_index.indices.struct_store.container_builder import (
     SQLContextContainerBuilder,
 )
-from llama_index.langchain_helpers.sql_wrapper import SQLDatabase
 from llama_index.schema import BaseNode
-from sqlalchemy import Table
+from llama_index.service_context import ServiceContext
+from llama_index.utilities.sql_wrapper import SQLDatabase
 
 
 class SQLQueryMode(str, Enum):
@@ -107,7 +108,7 @@ class SQLStructStoreIndex(BaseStructStoreIndex[SQLStructTable]):
             return index_struct
         else:
             data_extractor = SQLStructDatapointExtractor(
-                self._service_context.llm_predictor,
+                self._service_context.llm,
                 self.schema_extract_prompt,
                 self.output_parser,
                 self.sql_database,
@@ -120,14 +121,14 @@ class SQLStructStoreIndex(BaseStructStoreIndex[SQLStructTable]):
             for node in nodes:
                 source_to_node[node.ref_doc_id].append(node)
 
-            for _, node_set in source_to_node.items():
+            for node_set in source_to_node.values():
                 data_extractor.insert_datapoint_from_nodes(node_set)
         return index_struct
 
     def _insert(self, nodes: Sequence[BaseNode], **insert_kwargs: Any) -> None:
         """Insert a document."""
         data_extractor = SQLStructDatapointExtractor(
-            self._service_context.llm_predictor,
+            self._service_context.llm,
             self.schema_extract_prompt,
             self.output_parser,
             self.sql_database,

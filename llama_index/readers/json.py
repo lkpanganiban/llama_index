@@ -13,6 +13,7 @@ def _depth_first_yield(
     levels_back: int,
     collapse_length: Optional[int],
     path: List[str],
+    ensure_ascii: bool = False,
 ) -> Generator[str, None, None]:
     """Do depth first yield of all of the leaf nodes of a JSON.
 
@@ -23,9 +24,9 @@ def _depth_first_yield(
       of characters, then we collapse it into one line.
 
     """
-    if isinstance(json_data, dict) or isinstance(json_data, list):
+    if isinstance(json_data, (dict, list)):
         # only try to collapse if we're not at a leaf node
-        json_str = json.dumps(json_data)
+        json_str = json.dumps(json_data, ensure_ascii=ensure_ascii)
         if collapse_length is not None and len(json_str) <= collapse_length:
             new_path = path[-levels_back:]
             new_path.append(json_str)
@@ -64,35 +65,60 @@ class JSONReader(BaseReader):
           then a would be collapsed into one line, while b would not.
           Recommend starting around 100 and then adjusting from there.
 
+        is_jsonl (Optional[bool]): If True, indicates that the file is in JSONL format.
+        Defaults to False.
+
     """
 
     def __init__(
-        self, levels_back: Optional[int] = None, collapse_length: Optional[int] = None
+        self,
+        levels_back: Optional[int] = None,
+        collapse_length: Optional[int] = None,
+        ensure_ascii: bool = False,
+        is_jsonl: Optional[bool] = False,
     ) -> None:
         """Initialize with arguments."""
         super().__init__()
         self.levels_back = levels_back
         self.collapse_length = collapse_length
+        self.ensure_ascii = ensure_ascii
+        self.is_jsonl = is_jsonl
 
     def load_data(self, input_file: str) -> List[Document]:
         """Load data from the input file."""
-        with open(input_file, "r") as f:
-            data = json.load(f)
-            if self.levels_back is None:
-                # If levels_back isn't set, we just format and make each
-                # line an embedding
-                json_output = json.dumps(data, indent=0)
-                lines = json_output.split("\n")
-                useful_lines = [
-                    line for line in lines if not re.match(r"^[{}\[\],]*$", line)
-                ]
-                return [Document(text="\n".join(useful_lines))]
-            elif self.levels_back is not None:
-                # If levels_back is set, we make the embeddings contain the labels
-                # from further up the JSON tree
-                lines = [
-                    *_depth_first_yield(
-                        data, self.levels_back, self.collapse_length, []
+        with open(input_file, encoding="utf-8") as f:
+            load_data = []
+            if self.is_jsonl:
+                for line in f:
+                    load_data.append(json.loads(line.strip()))
+            else:
+                load_data = [json.load(f)]
+
+            documents = []
+            for data in load_data:
+                # print(data)
+                if self.levels_back is None:
+                    # If levels_back isn't set, we just format and make each
+                    # line an embedding
+                    json_output = json.dumps(
+                        data, indent=0, ensure_ascii=self.ensure_ascii
                     )
-                ]
-                return [Document(text="\n".join(lines))]
+                    lines = json_output.split("\n")
+                    useful_lines = [
+                        line for line in lines if not re.match(r"^[{}\[\],]*$", line)
+                    ]
+                    documents.append(Document(text="\n".join(useful_lines)))
+                elif self.levels_back is not None:
+                    # If levels_back is set, we make the embeddings contain the labels
+                    # from further up the JSON tree
+                    lines = [
+                        *_depth_first_yield(
+                            data,
+                            self.levels_back,
+                            self.collapse_length,
+                            [],
+                            self.ensure_ascii,
+                        )
+                    ]
+                    documents.append(Document(text="\n".join(lines)))
+            return documents

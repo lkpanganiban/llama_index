@@ -1,36 +1,25 @@
-"""Keyword-table based index.
+"""Knowledge Graph Index.
 
-Similar to a "hash table" in concept. LlamaIndex first tries
-to extract keywords from the source text, and stores the
-keywords as keys per item. It similarly extracts keywords
-from the query text. Then, it tries to match those keywords to
-existing keywords in the table.
+Build a KG by extracting triplets, and leveraging the KG during query-time.
 
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from llama_index.constants import GRAPH_STORE_KEY
+from llama_index.core.base_retriever import BaseRetriever
 from llama_index.data_structs.data_structs import KG
 from llama_index.graph_stores.simple import SimpleGraphStore
 from llama_index.graph_stores.types import GraphStore
 from llama_index.indices.base import BaseIndex
-from llama_index.indices.base_retriever import BaseRetriever
-from llama_index.indices.service_context import ServiceContext
-from llama_index.prompts.default_prompts import (
-    DEFAULT_KG_TRIPLET_EXTRACT_PROMPT,
-    DEFAULT_QUERY_KEYWORD_EXTRACT_TEMPLATE,
-)
-from llama_index.prompts.prompts import KnowledgeGraphPrompt
-from llama_index.schema import BaseNode, MetadataMode
+from llama_index.prompts import BasePromptTemplate
+from llama_index.prompts.default_prompts import DEFAULT_KG_TRIPLET_EXTRACT_PROMPT
+from llama_index.schema import BaseNode, IndexNode, MetadataMode
+from llama_index.service_context import ServiceContext
 from llama_index.storage.docstore.types import RefDocInfo
 from llama_index.storage.storage_context import StorageContext
-
-# import registery functions
-
-
-DQKET = DEFAULT_QUERY_KEYWORD_EXTRACT_TEMPLATE
+from llama_index.utils import get_tqdm_iterable
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +30,19 @@ class KnowledgeGraphIndex(BaseIndex[KG]):
     Build a KG by extracting triplets, and leveraging the KG during query-time.
 
     Args:
-        kg_triple_extract_template (KnowledgeGraphPrompt): The prompt to use for
+        kg_triple_extract_template (BasePromptTemplate): The prompt to use for
             extracting triplets.
         max_triplets_per_chunk (int): The maximum number of triplets to extract.
+        service_context (Optional[ServiceContext]): The service context to use.
+        storage_context (Optional[StorageContext]): The storage context to use.
         graph_store (Optional[GraphStore]): The graph store to use.
+        show_progress (bool): Whether to show tqdm progress bars. Defaults to False.
+        include_embeddings (bool): Whether to include embeddings in the index.
+            Defaults to False.
+        max_object_length (int): The maximum length of the object in a triplet.
+            Defaults to 128.
+        kg_triplet_extract_fn (Optional[Callable]): The function to use for
+            extracting triplets. Defaults to None.
 
     """
 
@@ -53,12 +51,16 @@ class KnowledgeGraphIndex(BaseIndex[KG]):
     def __init__(
         self,
         nodes: Optional[Sequence[BaseNode]] = None,
+        objects: Optional[Sequence[IndexNode]] = None,
         index_struct: Optional[KG] = None,
         service_context: Optional[ServiceContext] = None,
         storage_context: Optional[StorageContext] = None,
-        kg_triple_extract_template: Optional[KnowledgeGraphPrompt] = None,
+        kg_triple_extract_template: Optional[BasePromptTemplate] = None,
         max_triplets_per_chunk: int = 10,
         include_embeddings: bool = False,
+        show_progress: bool = False,
+        max_object_length: int = 128,
+        kg_triplet_extract_fn: Optional[Callable] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize params."""
@@ -74,12 +76,16 @@ class KnowledgeGraphIndex(BaseIndex[KG]):
                 max_knowledge_triplets=self.max_triplets_per_chunk
             )
         )
+        self._max_object_length = max_object_length
+        self._kg_triplet_extract_fn = kg_triplet_extract_fn
 
         super().__init__(
             nodes=nodes,
             index_struct=index_struct,
             service_context=service_context,
             storage_context=storage_context,
+            show_progress=show_progress,
+            objects=objects,
             **kwargs,
         )
 
@@ -97,7 +103,7 @@ class KnowledgeGraphIndex(BaseIndex[KG]):
         return self._graph_store
 
     def as_retriever(self, **kwargs: Any) -> BaseRetriever:
-        from llama_index.indices.knowledge_graph.retriever import (
+        from llama_index.indices.knowledge_graph.retrievers import (
             KGRetrieverMode,
             KGTableRetriever,
         )
@@ -105,36 +111,62 @@ class KnowledgeGraphIndex(BaseIndex[KG]):
         if len(self.index_struct.embedding_dict) > 0 and "retriever_mode" not in kwargs:
             kwargs["retriever_mode"] = KGRetrieverMode.HYBRID
 
-        return KGTableRetriever(self, **kwargs)
+        return KGTableRetriever(self, object_map=self._object_map, **kwargs)
 
     def _extract_triplets(self, text: str) -> List[Tuple[str, str, str]]:
+        if self._kg_triplet_extract_fn is not None:
+            return self._kg_triplet_extract_fn(text)
+        else:
+            return self._llm_extract_triplets(text)
+
+    def _llm_extract_triplets(self, text: str) -> List[Tuple[str, str, str]]:
         """Extract keywords from text."""
-        response, _ = self._service_context.llm_predictor.predict(
+        response = self._service_context.llm.predict(
             self.kg_triple_extract_template,
             text=text,
         )
-        return self._parse_triplet_response(response)
+        return self._parse_triplet_response(
+            response, max_length=self._max_object_length
+        )
 
     @staticmethod
-    def _parse_triplet_response(response: str) -> List[Tuple[str, str, str]]:
+    def _parse_triplet_response(
+        response: str, max_length: int = 128
+    ) -> List[Tuple[str, str, str]]:
         knowledge_strs = response.strip().split("\n")
         results = []
         for text in knowledge_strs:
-            if text == "" or text[0] != "(":
+            if "(" not in text or ")" not in text or text.index(")") < text.index("("):
                 # skip empty lines and non-triplets
                 continue
-            tokens = text[1:-1].split(",")
+            triplet_part = text[text.index("(") + 1 : text.index(")")]
+            tokens = triplet_part.split(",")
             if len(tokens) != 3:
                 continue
-            subj, pred, obj = tokens
-            results.append((subj.strip(), pred.strip(), obj.strip()))
+
+            if any(len(s.encode("utf-8")) > max_length for s in tokens):
+                # We count byte-length instead of len() for UTF-8 chars,
+                # will skip if any of the tokens are too long.
+                # This is normally due to a poorly formatted triplet
+                # extraction, in more serious KG building cases
+                # we'll need NLP models to better extract triplets.
+                continue
+
+            subj, pred, obj = map(str.strip, tokens)
+            if not subj or not pred or not obj:
+                # skip partial triplets
+                continue
+            results.append((subj, pred, obj))
         return results
 
     def _build_index_from_nodes(self, nodes: Sequence[BaseNode]) -> KG:
         """Build the index from nodes."""
         # do simple concatenation
         index_struct = self.index_struct_cls()
-        for n in nodes:
+        nodes_with_progress = get_tqdm_iterable(
+            nodes, self._show_progress, "Processing nodes"
+        )
+        for n in nodes_with_progress:
             triplets = self._extract_triplets(
                 n.get_content(metadata_mode=MetadataMode.LLM)
             )
@@ -145,15 +177,13 @@ class KnowledgeGraphIndex(BaseIndex[KG]):
                 index_struct.add_node([subj, obj], n)
 
             if self.include_embeddings:
-                for triplet in triplets:
-                    self._service_context.embed_model.queue_text_for_embedding(
-                        str(triplet), str(triplet)
-                    )
+                triplet_texts = [str(t) for t in triplets]
 
-                embed_outputs = (
-                    self._service_context.embed_model.get_queued_text_embeddings()
+                embed_model = self._service_context.embed_model
+                embed_outputs = embed_model.get_text_embedding_batch(
+                    triplet_texts, show_progress=self._show_progress
                 )
-                for rel_text, rel_embed in zip(*embed_outputs):
+                for rel_text, rel_embed in zip(triplet_texts, embed_outputs):
                     index_struct.add_to_embedding_dict(rel_text, rel_embed)
 
         return index_struct
@@ -187,7 +217,7 @@ class KnowledgeGraphIndex(BaseIndex[KG]):
         Used for manual insertion of KG triplets (in the form
         of (subject, relationship, object)).
 
-        Args
+        Args:
             triplet (str): Knowledge triplet
 
         """
@@ -266,19 +296,28 @@ class KnowledgeGraphIndex(BaseIndex[KG]):
             )
 
         g = nx.Graph()
-        # add nodes with limited number of starting nodes
-        for node_name in self.index_struct.table.keys():
-            if limit <= 0:
-                break
-            g.add_node(node_name)
-            limit -= 1
+        subjs = list(self.index_struct.table.keys())
 
         # add edges
-        rel_map = self._graph_store.get_rel_map(list(g.nodes().keys()), 1)
-        for keyword in rel_map.keys():
-            for rel, obj in rel_map[keyword]:
-                g.add_edge(keyword, obj, label=rel, title=rel)
+        rel_map = self._graph_store.get_rel_map(subjs=subjs, depth=1, limit=limit)
 
+        added_nodes = set()
+        for keyword in rel_map:
+            for path in rel_map[keyword]:
+                subj = keyword
+                for i in range(0, len(path), 2):
+                    if i + 2 >= len(path):
+                        break
+
+                    if subj not in added_nodes:
+                        g.add_node(subj)
+                        added_nodes.add(subj)
+
+                    rel = path[i + 1]
+                    obj = path[i + 2]
+
+                    g.add_edge(subj, obj, label=rel, title=rel)
+                    subj = obj
         return g
 
     @property

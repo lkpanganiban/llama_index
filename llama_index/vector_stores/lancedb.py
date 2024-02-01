@@ -1,13 +1,54 @@
 """LanceDB vector store."""
+import logging
 from typing import Any, List, Optional
 
-from llama_index.schema import MetadataMode, NodeRelationship, RelatedNodeInfo, TextNode
+import numpy as np
+from pandas import DataFrame
+
+from llama_index.schema import (
+    BaseNode,
+    MetadataMode,
+    NodeRelationship,
+    RelatedNodeInfo,
+    TextNode,
+)
 from llama_index.vector_stores.types import (
-    NodeWithEmbedding,
+    MetadataFilters,
     VectorStore,
     VectorStoreQuery,
     VectorStoreQueryResult,
 )
+from llama_index.vector_stores.utils import (
+    DEFAULT_TEXT_KEY,
+    legacy_metadata_dict_to_node,
+    metadata_dict_to_node,
+    node_to_metadata_dict,
+)
+
+_logger = logging.getLogger(__name__)
+
+
+def _to_lance_filter(standard_filters: MetadataFilters) -> Any:
+    """Translate standard metadata filters to Lance specific spec."""
+    filters = []
+    for filter in standard_filters.legacy_filters():
+        if isinstance(filter.value, str):
+            filters.append(filter.key + ' = "' + filter.value + '"')
+        else:
+            filters.append(filter.key + " = " + str(filter.value))
+    return " AND ".join(filters)
+
+
+def _to_llama_similarities(results: DataFrame) -> List[float]:
+    keys = results.keys()
+    normalized_similarities: np.ndarray
+    if "score" in keys:
+        normalized_similarities = np.exp(results["score"] - np.max(results["score"]))
+    elif "_distance" in keys:
+        normalized_similarities = np.exp(-results["_distance"])
+    else:
+        normalized_similarities = np.linspace(1, 0, len(results))
+    return normalized_similarities.tolist()
 
 
 class LanceDBVectorStore(VectorStore):
@@ -36,6 +77,7 @@ class LanceDBVectorStore(VectorStore):
     """
 
     stores_text = True
+    flat_metadata: bool = True
 
     def __init__(
         self,
@@ -43,12 +85,13 @@ class LanceDBVectorStore(VectorStore):
         table_name: str = "vectors",
         nprobes: int = 20,
         refine_factor: Optional[int] = None,
+        text_key: str = DEFAULT_TEXT_KEY,
         **kwargs: Any,
     ) -> None:
         """Init params."""
         import_err_msg = "`lancedb` package not found, please run `pip install lancedb`"
         try:
-            import lancedb  # noqa: F401
+            import lancedb
         except ImportError:
             raise ImportError(import_err_msg)
 
@@ -56,29 +99,34 @@ class LanceDBVectorStore(VectorStore):
         self.uri = uri
         self.table_name = table_name
         self.nprobes = nprobes
+        self.text_key = text_key
         self.refine_factor = refine_factor
 
     @property
     def client(self) -> None:
         """Get client."""
-        return None
+        return
 
     def add(
         self,
-        embedding_results: List[NodeWithEmbedding],
+        nodes: List[BaseNode],
+        **add_kwargs: Any,
     ) -> List[str]:
         data = []
         ids = []
-        for result in embedding_results:
-            data.append(
-                {
-                    "id": result.id,
-                    "doc_id": result.ref_doc_id,
-                    "vector": result.embedding,
-                    "text": result.node.get_content(metadata_mode=MetadataMode.NONE),
-                }
+        for node in nodes:
+            metadata = node_to_metadata_dict(
+                node, remove_text=False, flat_metadata=self.flat_metadata
             )
-            ids.append(result.id)
+            append_data = {
+                "id": node.node_id,
+                "doc_id": node.ref_doc_id,
+                "vector": node.get_embedding(),
+                "text": node.get_content(metadata_mode=MetadataMode.NONE),
+                "metadata": metadata,
+            }
+            data.append(append_data)
+            ids.append(node.node_id)
 
         if self.table_name in self.connection.table_names():
             tbl = self.connection.open_table(self.table_name)
@@ -95,7 +143,8 @@ class LanceDBVectorStore(VectorStore):
             ref_doc_id (str): The doc_id of the document to delete.
 
         """
-        raise NotImplementedError("Delete not yet implemented for LanceDB.")
+        table = self.connection.open_table(self.table_name)
+        table.delete('document_id = "' + ref_doc_id + '"')
 
     def query(
         self,
@@ -104,12 +153,21 @@ class LanceDBVectorStore(VectorStore):
     ) -> VectorStoreQueryResult:
         """Query index for top k most similar nodes."""
         if query.filters is not None:
-            raise ValueError("Metadata filters not implemented for LanceDB yet.")
+            if "where" in kwargs:
+                raise ValueError(
+                    "Cannot specify filter via both query and kwargs. "
+                    "Use kwargs only for lancedb specific items that are "
+                    "not supported via the generic query interface."
+                )
+            where = _to_lance_filter(query.filters)
+        else:
+            where = kwargs.pop("where", None)
 
         table = self.connection.open_table(self.table_name)
         lance_query = (
             table.search(query.query_embedding)
             .limit(query.similarity_top_k)
+            .where(where)
             .nprobes(self.nprobes)
         )
 
@@ -119,17 +177,32 @@ class LanceDBVectorStore(VectorStore):
         results = lance_query.to_df()
         nodes = []
         for _, item in results.iterrows():
-            node = TextNode(
-                text=item.text,
-                id_=item.id,
-                relationships={
-                    NodeRelationship.SOURCE: RelatedNodeInfo(node_id=item.doc_id),
-                },
-            )
+            try:
+                node = metadata_dict_to_node(item.metadata)
+                node.embedding = list(item.vector)
+            except Exception:
+                # deprecated legacy logic for backward compatibility
+                _logger.debug(
+                    "Failed to parse Node metadata, fallback to legacy logic."
+                )
+                metadata, node_info, _relation = legacy_metadata_dict_to_node(
+                    item.metadata, text_key=self.text_key
+                )
+                node = TextNode(
+                    text=item.text or "",
+                    id_=item.id,
+                    metadata=metadata,
+                    start_char_idx=node_info.get("start", None),
+                    end_char_idx=node_info.get("end", None),
+                    relationships={
+                        NodeRelationship.SOURCE: RelatedNodeInfo(node_id=item.doc_id),
+                    },
+                )
+
             nodes.append(node)
 
         return VectorStoreQueryResult(
             nodes=nodes,
-            similarities=results["score"].tolist(),
+            similarities=_to_llama_similarities(results),
             ids=results["id"].tolist(),
         )

@@ -1,35 +1,45 @@
-"""Retrievers for ListIndex."""
+"""Retrievers for SummaryIndex."""
 import logging
 from typing import Any, Callable, List, Optional, Tuple
 
-from llama_index.indices.base_retriever import BaseRetriever
-from llama_index.indices.list.base import ListIndex
+from llama_index.callbacks.base import CallbackManager
+from llama_index.core.base_retriever import BaseRetriever
+from llama_index.indices.list.base import SummaryIndex
 from llama_index.indices.query.embedding_utils import get_top_k_embeddings
-from llama_index.indices.query.schema import QueryBundle
-from llama_index.indices.service_context import ServiceContext
 from llama_index.indices.utils import (
     default_format_node_batch_fn,
     default_parse_choice_select_answer_fn,
 )
-from llama_index.prompts.choice_select import (
+from llama_index.prompts import PromptTemplate
+from llama_index.prompts.default_prompts import (
     DEFAULT_CHOICE_SELECT_PROMPT,
-    ChoiceSelectPrompt,
 )
-from llama_index.schema import BaseNode, NodeWithScore, MetadataMode
+from llama_index.schema import BaseNode, MetadataMode, NodeWithScore, QueryBundle
+from llama_index.service_context import ServiceContext
 
 logger = logging.getLogger(__name__)
 
 
-class ListIndexRetriever(BaseRetriever):
-    """Simple retriever for ListIndex that returns all nodes.
+class SummaryIndexRetriever(BaseRetriever):
+    """Simple retriever for SummaryIndex that returns all nodes.
 
     Args:
-        index (ListIndex): The index to retrieve from.
+        index (SummaryIndex): The index to retrieve from.
 
     """
 
-    def __init__(self, index: ListIndex, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        index: SummaryIndex,
+        callback_manager: Optional[CallbackManager] = None,
+        object_map: Optional[dict] = None,
+        verbose: bool = False,
+        **kwargs: Any,
+    ) -> None:
         self._index = index
+        super().__init__(
+            callback_manager=callback_manager, object_map=object_map, verbose=verbose
+        )
 
     def _retrieve(
         self,
@@ -43,26 +53,32 @@ class ListIndexRetriever(BaseRetriever):
         return [NodeWithScore(node=node) for node in nodes]
 
 
-class ListIndexEmbeddingRetriever(BaseRetriever):
-    """Embedding based retriever for ListIndex.
+class SummaryIndexEmbeddingRetriever(BaseRetriever):
+    """Embedding based retriever for SummaryIndex.
 
     Generates embeddings in a lazy fashion for all
     nodes that are traversed.
 
     Args:
-        index (ListIndex): The index to retrieve from.
+        index (SummaryIndex): The index to retrieve from.
         similarity_top_k (Optional[int]): The number of top nodes to return.
 
     """
 
     def __init__(
         self,
-        index: ListIndex,
+        index: SummaryIndex,
         similarity_top_k: Optional[int] = 1,
+        callback_manager: Optional[CallbackManager] = None,
+        object_map: Optional[dict] = None,
+        verbose: bool = False,
         **kwargs: Any,
     ) -> None:
         self._index = index
         self._similarity_top_k = similarity_top_k
+        super().__init__(
+            callback_manager=callback_manager, object_map=object_map, verbose=verbose
+        )
 
     def _retrieve(
         self,
@@ -118,12 +134,12 @@ class ListIndexEmbeddingRetriever(BaseRetriever):
         return query_bundle.embedding, node_embeddings
 
 
-class ListIndexLLMRetriever(BaseRetriever):
-    """LLM retriever for ListIndex.
+class SummaryIndexLLMRetriever(BaseRetriever):
+    """LLM retriever for SummaryIndex.
 
     Args:
-        index (ListIndex): The index to retrieve from.
-        choice_select_prompt (Optional[ChoiceSelectPrompt]): A Choice-Select Prompt
+        index (SummaryIndex): The index to retrieve from.
+        choice_select_prompt (Optional[PromptTemplate]): A Choice-Select Prompt
            (see :ref:`Prompt-Templates`).)
         choice_batch_size (int): The number of nodes to query at a time.
         format_node_batch_fn (Optional[Callable]): A function that formats a
@@ -136,12 +152,15 @@ class ListIndexLLMRetriever(BaseRetriever):
 
     def __init__(
         self,
-        index: ListIndex,
-        choice_select_prompt: Optional[ChoiceSelectPrompt] = None,
+        index: SummaryIndex,
+        choice_select_prompt: Optional[PromptTemplate] = None,
         choice_batch_size: int = 10,
         format_node_batch_fn: Optional[Callable] = None,
         parse_choice_select_answer_fn: Optional[Callable] = None,
         service_context: Optional[ServiceContext] = None,
+        callback_manager: Optional[CallbackManager] = None,
+        object_map: Optional[dict] = None,
+        verbose: bool = False,
         **kwargs: Any,
     ) -> None:
         self._index = index
@@ -156,6 +175,9 @@ class ListIndexLLMRetriever(BaseRetriever):
             parse_choice_select_answer_fn or default_parse_choice_select_answer_fn
         )
         self._service_context = service_context or index.service_context
+        super().__init__(
+            callback_manager=callback_manager, object_map=object_map, verbose=verbose
+        )
 
     def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
         """Retrieve nodes."""
@@ -168,7 +190,7 @@ class ListIndexLLMRetriever(BaseRetriever):
             query_str = query_bundle.query_str
             fmt_batch_str = self._format_node_batch_fn(nodes_batch)
             # call each batch independently
-            raw_response, _ = self._service_context.llm_predictor.predict(
+            raw_response = self._service_context.llm.predict(
                 self._choice_select_prompt,
                 context_str=fmt_batch_str,
                 query_str=query_str,
@@ -189,3 +211,9 @@ class ListIndexLLMRetriever(BaseRetriever):
                 ]
             )
         return results
+
+
+# for backwards compatibility
+ListIndexEmbeddingRetriever = SummaryIndexEmbeddingRetriever
+ListIndexLLMRetriever = SummaryIndexLLMRetriever
+ListIndexRetriever = SummaryIndexRetriever

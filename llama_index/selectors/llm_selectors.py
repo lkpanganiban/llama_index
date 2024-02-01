@@ -1,20 +1,25 @@
-from typing import Any, List, Optional, Sequence, cast
+from typing import Any, Dict, List, Optional, Sequence, cast
 
-from llama_index.indices.query.schema import QueryBundle
-from llama_index.indices.service_context import ServiceContext
-from llama_index.llm_predictor.base import BaseLLMPredictor
+from llama_index.core.base_selector import (
+    BaseSelector,
+    SelectorResult,
+    SingleSelection,
+)
+from llama_index.llm_predictor.base import LLMPredictorType
 from llama_index.output_parsers.base import StructuredOutput
-from llama_index.types import BaseOutputParser
 from llama_index.output_parsers.selection import Answer, SelectionOutputParser
+from llama_index.prompts.mixin import PromptDictType
 from llama_index.prompts.prompt_type import PromptType
+from llama_index.schema import QueryBundle
 from llama_index.selectors.prompts import (
     DEFAULT_MULTI_SELECT_PROMPT_TMPL,
     DEFAULT_SINGLE_SELECT_PROMPT_TMPL,
     MultiSelectPrompt,
     SingleSelectPrompt,
 )
-from llama_index.selectors.types import BaseSelector, SelectorResult, SingleSelection
+from llama_index.service_context import ServiceContext
 from llama_index.tools.types import ToolMetadata
+from llama_index.types import BaseOutputParser
 
 
 def _build_choices_text(choices: Sequence[ToolMetadata]) -> str:
@@ -41,21 +46,21 @@ def _structured_output_to_selector_result(output: Any) -> SelectorResult:
 
 
 class LLMSingleSelector(BaseSelector):
-    """LLM single selector
+    """LLM single selector.
 
     LLM-based selector that chooses one out of many options.
 
     Args:
-        llm_predictor (BaseLLMPredictor): An LLM predictor.
+        LLM (LLM): An LLM.
         prompt (SingleSelectPrompt): A LLM prompt for selecting one out of many options.
     """
 
     def __init__(
         self,
-        llm_predictor: BaseLLMPredictor,
+        llm: LLMPredictorType,
         prompt: SingleSelectPrompt,
     ) -> None:
-        self._llm_predictor = llm_predictor
+        self._llm = llm
         self._prompt = prompt
 
         if self._prompt.output_parser is None:
@@ -73,16 +78,22 @@ class LLMSingleSelector(BaseSelector):
         prompt_template_str = prompt_template_str or DEFAULT_SINGLE_SELECT_PROMPT_TMPL
         output_parser = output_parser or SelectionOutputParser()
 
-        # add output formatting to prompt template
-        prompt_template_str = output_parser.format(prompt_template_str)
-
         # construct prompt
         prompt = SingleSelectPrompt(
             template=prompt_template_str,
             output_parser=output_parser,
             prompt_type=PromptType.SINGLE_SELECT,
         )
-        return cls(service_context.llm_predictor, prompt)
+        return cls(service_context.llm, prompt)
+
+    def _get_prompts(self) -> Dict[str, Any]:
+        """Get prompts."""
+        return {"prompt": self._prompt}
+
+    def _update_prompts(self, prompts: PromptDictType) -> None:
+        """Update prompts."""
+        if "prompt" in prompts:
+            self._prompt = prompts["prompt"]
 
     def _select(
         self, choices: Sequence[ToolMetadata], query: QueryBundle
@@ -91,7 +102,7 @@ class LLMSingleSelector(BaseSelector):
         choices_text = _build_choices_text(choices)
 
         # predict
-        prediction, _ = self._llm_predictor.predict(
+        prediction = self._llm.predict(
             prompt=self._prompt,
             num_choices=len(choices),
             context_list=choices_text,
@@ -110,7 +121,7 @@ class LLMSingleSelector(BaseSelector):
         choices_text = _build_choices_text(choices)
 
         # predict
-        prediction, _ = await self._llm_predictor.apredict(
+        prediction = await self._llm.apredict(
             prompt=self._prompt,
             num_choices=len(choices),
             context_list=choices_text,
@@ -124,23 +135,23 @@ class LLMSingleSelector(BaseSelector):
 
 
 class LLMMultiSelector(BaseSelector):
-    """LLM multi selector
+    """LLM multi selector.
 
     LLM-based selector that chooses multiple out of many options.
 
     Args:
-        llm_predictor (LLMPredictor): An LLM predictor.
+        llm (LLM): An LLM.
         prompt (SingleSelectPrompt): A LLM prompt for selecting multiple out of many
             options.
     """
 
     def __init__(
         self,
-        llm_predictor: BaseLLMPredictor,
+        llm: LLMPredictorType,
         prompt: MultiSelectPrompt,
         max_outputs: Optional[int] = None,
     ) -> None:
-        self._llm_predictor = llm_predictor
+        self._llm = llm
         self._prompt = prompt
         self._max_outputs = max_outputs
 
@@ -168,7 +179,16 @@ class LLMMultiSelector(BaseSelector):
             output_parser=output_parser,
             prompt_type=PromptType.MULTI_SELECT,
         )
-        return cls(service_context.llm_predictor, prompt, max_outputs)
+        return cls(service_context.llm, prompt, max_outputs)
+
+    def _get_prompts(self) -> Dict[str, Any]:
+        """Get prompts."""
+        return {"prompt": self._prompt}
+
+    def _update_prompts(self, prompts: PromptDictType) -> None:
+        """Update prompts."""
+        if "prompt" in prompts:
+            self._prompt = prompts["prompt"]
 
     def _select(
         self, choices: Sequence[ToolMetadata], query: QueryBundle
@@ -177,7 +197,7 @@ class LLMMultiSelector(BaseSelector):
         context_list = _build_choices_text(choices)
         max_outputs = self._max_outputs or len(choices)
 
-        prediction, _ = self._llm_predictor.predict(
+        prediction = self._llm.predict(
             prompt=self._prompt,
             num_choices=len(choices),
             max_outputs=max_outputs,
@@ -196,7 +216,7 @@ class LLMMultiSelector(BaseSelector):
         context_list = _build_choices_text(choices)
         max_outputs = self._max_outputs or len(choices)
 
-        prediction, _ = await self._llm_predictor.apredict(
+        prediction = await self._llm.apredict(
             prompt=self._prompt,
             num_choices=len(choices),
             max_outputs=max_outputs,

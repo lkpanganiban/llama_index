@@ -4,13 +4,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
-from llama_index.readers.base import BaseReader
+from llama_index.bridge.pydantic import PrivateAttr
+from llama_index.readers.base import BasePydanticReader
 from llama_index.schema import Document
 
 logger = logging.getLogger(__name__)
 
 
-class SimpleWebPageReader(BaseReader):
+class SimpleWebPageReader(BasePydanticReader):
     """Simple web page reader.
 
     Reads pages from the web.
@@ -18,18 +19,34 @@ class SimpleWebPageReader(BaseReader):
     Args:
         html_to_text (bool): Whether to convert HTML to text.
             Requires `html2text` package.
-
+        metadata_fn (Optional[Callable[[str], Dict]]): A function that takes in
+            a URL and returns a dictionary of metadata.
+            Default is None.
     """
 
-    def __init__(self, html_to_text: bool = False) -> None:
+    is_remote: bool = True
+    html_to_text: bool
+
+    _metadata_fn: Optional[Callable[[str], Dict]] = PrivateAttr()
+
+    def __init__(
+        self,
+        html_to_text: bool = False,
+        metadata_fn: Optional[Callable[[str], Dict]] = None,
+    ) -> None:
         """Initialize with parameters."""
         try:
-            import html2text  # noqa: F401
+            import html2text  # noqa
         except ImportError:
             raise ImportError(
                 "`html2text` package not found, please run `pip install html2text`"
             )
-        self._html_to_text = html_to_text
+        self._metadata_fn = metadata_fn
+        super().__init__(html_to_text=html_to_text)
+
+    @classmethod
+    def class_name(cls) -> str:
+        return "SimpleWebPageReader"
 
     def load_data(self, urls: List[str]) -> List[Document]:
         """Load data from the input directory.
@@ -46,17 +63,22 @@ class SimpleWebPageReader(BaseReader):
         documents = []
         for url in urls:
             response = requests.get(url, headers=None).text
-            if self._html_to_text:
+            if self.html_to_text:
                 import html2text
 
                 response = html2text.html2text(response)
 
-            documents.append(Document(text=response))
+            metadata: Optional[Dict] = None
+            if self._metadata_fn is not None:
+                metadata = self._metadata_fn(url)
+
+            documents.append(Document(text=response, id_=url, metadata=metadata or {}))
+            documents.append(Document(id_=url, text=response, metadata=metadata or {}))
 
         return documents
 
 
-class TrafilaturaWebReader(BaseReader):
+class TrafilaturaWebReader(BasePydanticReader):
     """Trafilatura web page reader.
 
     Reads pages from the web.
@@ -64,19 +86,26 @@ class TrafilaturaWebReader(BaseReader):
 
     """
 
+    is_remote: bool = True
+    error_on_missing: bool
+
     def __init__(self, error_on_missing: bool = False) -> None:
         """Initialize with parameters.
 
         Args:
             error_on_missing (bool): Throw an error when data cannot be parsed
         """
-        self.error_on_missing = error_on_missing
         try:
-            import trafilatura  # noqa: F401
+            import trafilatura  # noqa
         except ImportError:
             raise ImportError(
                 "`trafilatura` package not found, please run `pip install trafilatura`"
             )
+        super().__init__(error_on_missing=error_on_missing)
+
+    @classmethod
+    def class_name(cls) -> str:
+        return "TrafilaturaWebReader"
 
     def load_data(self, urls: List[str]) -> List[Document]:
         """Load data from the urls.
@@ -104,7 +133,7 @@ class TrafilaturaWebReader(BaseReader):
                 if self.error_on_missing:
                     raise ValueError(f"Trafilatura fails to parse page: {url}")
                 continue
-            documents.append(Document(text=response))
+            documents.append(Document(id_=url, text=response))
 
         return documents
 
@@ -125,7 +154,7 @@ DEFAULT_WEBSITE_EXTRACTOR: Dict[str, Callable[[Any], Tuple[str, Dict[str, Any]]]
 }
 
 
-class BeautifulSoupWebReader(BaseReader):
+class BeautifulSoupWebReader(BasePydanticReader):
     """BeautifulSoup web page reader.
 
     Reads pages from the web.
@@ -137,23 +166,31 @@ class BeautifulSoupWebReader(BaseReader):
             extract text from the BeautifulSoup obj. See DEFAULT_WEBSITE_EXTRACTOR.
     """
 
+    is_remote: bool = True
+    _website_extractor: Dict[str, Callable] = PrivateAttr()
+
     def __init__(
         self,
         website_extractor: Optional[Dict[str, Callable]] = None,
     ) -> None:
         """Initialize with parameters."""
         try:
-            from urllib.parse import urlparse  # noqa: F401
+            from urllib.parse import urlparse  # noqa
 
-            import requests  # noqa: F401
-            from bs4 import BeautifulSoup  # noqa: F401
+            import requests  # noqa
+            from bs4 import BeautifulSoup  # noqa
         except ImportError:
             raise ImportError(
                 "`bs4`, `requests`, and `urllib` must be installed to scrape websites."
                 "Please run `pip install bs4 requests urllib`."
             )
 
-        self.website_extractor = website_extractor or DEFAULT_WEBSITE_EXTRACTOR
+        self._website_extractor = website_extractor or DEFAULT_WEBSITE_EXTRACTOR
+        super().__init__()
+
+    @classmethod
+    def class_name(cls) -> str:
+        return "BeautifulSoupWebReader"
 
     def load_data(
         self, urls: List[str], custom_hostname: Optional[str] = None
@@ -187,23 +224,26 @@ class BeautifulSoupWebReader(BaseReader):
 
             data = ""
             metadata = {"URL": url}
-            if hostname in self.website_extractor:
-                data, metadata = self.website_extractor[hostname](soup)
+            if hostname in self._website_extractor:
+                data, metadata = self._website_extractor[hostname](soup)
                 metadata.update(metadata)
             else:
                 data = soup.getText()
 
-            documents.append(Document(text=data, metadata=metadata))
+            documents.append(Document(id_=url, text=data, metadata=metadata))
 
         return documents
 
 
-class RssReader(BaseReader):
+class RssReader(BasePydanticReader):
     """RSS reader.
 
     Reads content from an RSS feed.
 
     """
+
+    is_remote: bool = True
+    html_to_text: bool
 
     def __init__(self, html_to_text: bool = False) -> None:
         """Initialize with parameters.
@@ -214,7 +254,7 @@ class RssReader(BaseReader):
 
         """
         try:
-            import feedparser  # noqa: F401
+            import feedparser  # noqa
         except ImportError:
             raise ImportError(
                 "`feedparser` package not found, please run `pip install feedparser`"
@@ -222,12 +262,16 @@ class RssReader(BaseReader):
 
         if html_to_text:
             try:
-                import html2text  # noqa: F401
+                import html2text  # noqa
             except ImportError:
                 raise ImportError(
                     "`html2text` package not found, please run `pip install html2text`"
                 )
-        self._html_to_text = html_to_text
+        super().__init__(html_to_text=html_to_text)
+
+    @classmethod
+    def class_name(cls) -> str:
+        return "RssReader"
 
     def load_data(self, urls: List[str]) -> List[Document]:
         """Load data from RSS feeds.
@@ -249,18 +293,19 @@ class RssReader(BaseReader):
         for url in urls:
             parsed = feedparser.parse(url)
             for entry in parsed.entries:
+                doc_id = entry.id or entry.link
                 if "content" in entry:
                     data = entry.content[0].value
                 else:
                     data = entry.description or entry.summary
 
-                if self._html_to_text:
+                if self.html_to_text:
                     import html2text
 
                     data = html2text.html2text(data)
 
                 metadata = {"title": entry.title, "link": entry.link}
-                documents.append(Document(text=data, metadata=metadata))
+                documents.append(Document(id_=doc_id, text=data, metadata=metadata))
 
         return documents
 

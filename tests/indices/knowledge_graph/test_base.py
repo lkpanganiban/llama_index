@@ -4,12 +4,11 @@ from typing import Any, Dict, List, Tuple
 from unittest.mock import patch
 
 import pytest
-
 from llama_index.embeddings.base import BaseEmbedding
 from llama_index.indices.knowledge_graph.base import KnowledgeGraphIndex
-from llama_index.indices.service_context import ServiceContext
-from llama_index.schema import Document
-from llama_index.schema import TextNode
+from llama_index.schema import Document, TextNode
+from llama_index.service_context import ServiceContext
+
 from tests.mock_utils.mock_prompts import (
     MOCK_KG_TRIPLET_EXTRACT_PROMPT,
     MOCK_QUERY_KEYWORD_EXTRACT_PROMPT,
@@ -17,6 +16,27 @@ from tests.mock_utils.mock_prompts import (
 
 
 class MockEmbedding(BaseEmbedding):
+    @classmethod
+    def class_name(cls) -> str:
+        return "MockEmbedding"
+
+    async def _aget_query_embedding(self, query: str) -> List[float]:
+        del query
+        return [0, 0, 1, 0, 0]
+
+    async def _aget_text_embedding(self, text: str) -> List[float]:
+        # assume dimensions are 4
+        if text == "('foo', 'is', 'bar')":
+            return [1, 0, 0, 0]
+        elif text == "('hello', 'is not', 'world')":
+            return [0, 1, 0, 0]
+        elif text == "('Jane', 'is mother of', 'Bob')":
+            return [0, 0, 1, 0]
+        elif text == "foo":
+            return [0, 0, 0, 1]
+        else:
+            raise ValueError("Invalid text for `mock_get_text_embedding`.")
+
     def _get_text_embedding(self, text: str) -> List[float]:
         """Mock get text embedding."""
         # assume dimensions are 4
@@ -37,7 +57,7 @@ class MockEmbedding(BaseEmbedding):
         return [0, 0, 1, 0, 0]
 
 
-@pytest.fixture
+@pytest.fixture()
 def struct_kwargs() -> Tuple[Dict, Dict]:
     """Index kwargs."""
     index_kwargs = {
@@ -198,3 +218,20 @@ def test_build_kg(
     assert len(all_ref_doc_info) == 1
     for ref_doc_info in all_ref_doc_info.values():
         assert len(ref_doc_info.node_ids) == 3
+
+
+def test__parse_triplet_response(
+    doc_triplets_with_text_around: List[Document],
+    mock_service_context: ServiceContext,
+) -> None:
+    """Test build knowledge graph with triplet response in other format."""
+    parsed_triplets = []
+    for doc_triplet in doc_triplets_with_text_around:
+        parsed_triplets.append(
+            KnowledgeGraphIndex._parse_triplet_response(doc_triplet.text)
+        )
+    assert len(parsed_triplets) == 1
+    assert len(parsed_triplets[0]) == 3
+    assert ("foo", "is", "bar") in parsed_triplets[0]
+    assert ("hello", "is not", "world") in parsed_triplets[0]
+    assert ("Jane", "is mother of", "Bob") in parsed_triplets[0]

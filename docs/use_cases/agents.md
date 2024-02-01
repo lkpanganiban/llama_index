@@ -1,8 +1,8 @@
 # Agents
 
-## Context
 An "agent" is an automated reasoning and decision engine. It takes in a user input/query and can make internal decisions for executing
 that query in order to return the correct result. The key agent components can include, but are not limited to:
+
 - Breaking down a complex question into smaller ones
 - Choosing an external Tool to use + coming up with parameters for calling the Tool
 - Planning out a set of tasks
@@ -10,87 +10,35 @@ that query in order to return the correct result. The key agent components can i
 
 Research developments in LLMs (e.g. [ChatGPT Plugins](https://openai.com/blog/chatgpt-plugins)), LLM research ([ReAct](https://arxiv.org/abs/2210.03629), [Toolformer](https://arxiv.org/abs/2302.04761)) and LLM tooling ([LangChain](https://python.langchain.com/en/latest/modules/agents.html), [Semantic Kernel](https://github.com/microsoft/semantic-kernel)) have popularized the concept of agents.
 
-
-
 ## Agents + LlamaIndex
 
-LlamaIndex provides some amazing tools to manage and interact with your data within your LLM application. And it can be a core tool that you use while building an agent-based app.
-- On one hand, some components within LlamaIndex are "agent-like" - these make automated decisions to help a particular use case over your data.
+LlamaIndex provides some amazing tools to manage and interact with your data within your LLM application. And it is a core tool that you use while building an agent-based app.
+
+- On one hand, many components within LlamaIndex are "agentic" - these make automated decisions to help a particular use case over your data. This ranges from simple reasoning (routing) to reasoning loops with memory (ReAct).
 - On the other hand, LlamaIndex can be used as a core Tool within another agent framework.
 
-In general, LlamaIndex components offer more explicit, constrained behavior for more specific use cases. Agent frameworks such as ReAct (implemented in LangChain) offer agents that are more unconstrained + 
-capable of general reasoning. 
+## Resources
 
-There are tradeoffs for using both - less-capable LLMs typically do better with more constraints. Take a look at [our blog post on this](https://medium.com/llamaindex-blog/dumber-llm-agents-need-more-constraints-and-better-tools-17a524c59e12) for 
-a more information + a detailed analysis.
-
-
-### "Agent-like" Components within LlamaIndex 
-
-LlamaIndex provides core modules capable of automated reasoning for different use cases over your data. Please check out our [use cases doc](/use_cases/queries.md) for more details on high-level use cases that LlamaIndex can help fulfill.
-
-Some of these core modules are shown below along with example tutorials (not comprehensive, please click into the guides/how-tos for more details).
-
-**SubQuestionQueryEngine for Multi-Document Analysis**
-- [Usage](queries.md#multi-document-queries)
-- [Sub Question Query Engine (Intro)](/examples/query_engine/sub_question_query_engine.ipynb)
-- [10Q Analysis (Uber)](/examples/usecases/10q_sub_question.ipynb)
-- [10K Analysis (Uber and Lyft)](/examples/usecases/10k_sub_question.ipynb)
-
-
-**Query Transformations**
-- [How-To](/how_to/query_engine/advanced/query_transformations.md)
-- [Multi-Step Query Decomposition](/examples/query_transformations/HyDEQueryTransformDemo.ipynb) ([Notebook](https://github.com/jerryjliu/llama_index/blob/main/docs/examples/query_transformations/HyDEQueryTransformDemo.ipynb))
-
-**Routing**
-- [Usage](queries.md#routing-over-heterogeneous-data)
-- [Router Query Engine Guide](/examples/query_engine/RouterQueryEngine.ipynb) ([Notebook](https://github.com/jerryjliu/llama_index/blob/main/docs/examples/query_engine/RouterQueryEngine.ipynb))
-
-**LLM Reranking**
-- [Second Stage Processing How-To](/how_to/query_engine/advanced/second_stage.md)
-- [LLM Reranking Guide (Great Gatsby)](/examples/node_postprocessor/LLMReranker-Gatsby.ipynb)
-
-**Chat Engines**
-- [Chat Engines How-To](../how_to/chat_engine/root.md)
-
-
-### Using LlamaIndex as as Tool within an Agent Framework
-
-LlamaIndex can be used as as Tool within an agent framework - including LangChain, ChatGPT. These integrations are described below.
-
-#### LangChain
-
-We have deep integrations with LangChain. 
-LlamaIndex query engines can be easily packaged as Tools to be used within a LangChain agent, and LlamaIndex can also be used as a memory module / retriever. Check out our guides/tutorials below!
-
-**Resources**
-- [LangChain integration guide](/how_to/integrations/using_with_langchain.md)
-- [Building a Chatbot Tutorial (LangChain + LlamaIndex)](/guides/tutorials/building_a_chatbot.md)
-- [OnDemandLoaderTool Tutorial](/examples/tools/OnDemandLoaderTool.ipynb)
-
-#### ChatGPT
-
-LlamaIndex can be used as a ChatGPT retrieval plugin (we have a TODO to develop a more general plugin as well).
-
-**Resources**
-- [LlamaIndex ChatGPT Retrieval Plugin](https://github.com/openai/chatgpt-retrieval-plugin#llamaindex)
-
-
-### Native OpenAIAgent
-
-With the [new OpenAI API](https://openai.com/blog/function-calling-and-other-api-updates) that supports function calling, it’s never been easier to build your own agent!
-
-Learn how to write your own OpenAI agent in **under 50 lines of code**, or directly use our super simple
-`OpenAIAgent` implementation.
+If you've built a RAG pipeline already and want to extend it with agentic behavior, check out the below resources
 
 ```{toctree}
 ---
 maxdepth: 1
 ---
-/examples/agent/openai_agent.ipynb
-/examples/agent/openai_agent_with_query_engine.ipynb
-/examples/agent/openai_agent_retrieval.ipynb
-/examples/agent/openai_agent_query_cookbook.ipynb
-/examples/agent/openai_agent_query_plan.ipynb
-/examples/agent/openai_agent_context_retrieval.ipynb
+Agents (Putting your RAG Pipeline Together) </understanding/putting_it_all_together/agents.md>
+Agentic Strategies (Optimizing your RAG Pipeline) </optimizing/agentic_strategies/agentic_strategies.md>
 ```
+
+If you want to check out our standalone documentation hubs on agents and tools, check out the following module guides:
+
+```{toctree}
+---
+maxdepth: 1
+---
+/module_guides/deploying/agents/root.md
+/module_guides/deploying/agents/tools/root.md
+```
+
+## LlamaHub
+
+We offer a collection of 40+ agent tools for use with your agent in [LlamaHub](https://llamahub.ai/) 🦙.

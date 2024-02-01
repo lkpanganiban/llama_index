@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field
-from typing import List
 import enum
+from typing import List
+
+from llama_index.bridge.pydantic import BaseModel, Field
 
 
 class NodeType(str, enum.Enum):
@@ -25,11 +26,17 @@ class Node(BaseModel):
     name: str = Field(..., description="Name of the folder")
     children: List["Node"] = Field(
         default_factory=list,
-        description="List of children nodes, only applicable for folders, files cannot have children",
+        description=(
+            "List of children nodes, only applicable for folders, files cannot"
+            " have children"
+        ),
     )
     node_type: NodeType = Field(
         default=NodeType.FILE,
-        description="Either a file or folder, use the name to determine which it could be",
+        description=(
+            "Either a file or folder, use the name to determine which it"
+            " could be"
+        ),
     )
 
 

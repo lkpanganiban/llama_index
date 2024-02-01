@@ -1,13 +1,15 @@
 """Answer inserter."""
 
-from abc import ABC, abstractmethod
-from typing import List, Optional
+from abc import abstractmethod
+from typing import Any, Dict, List, Optional
+
+from llama_index.prompts.base import BasePromptTemplate, PromptTemplate
+from llama_index.prompts.mixin import PromptDictType, PromptMixin, PromptMixinType
 from llama_index.query_engine.flare.schema import QueryTask
-from llama_index.prompts.base import Prompt
-from llama_index.indices.service_context import ServiceContext
+from llama_index.service_context import ServiceContext
 
 
-class BaseLookaheadAnswerInserter(ABC):
+class BaseLookaheadAnswerInserter(PromptMixin):
     """Lookahead answer inserter.
 
     These are responsible for insert answers into a lookahead answer template.
@@ -22,6 +24,10 @@ class BaseLookaheadAnswerInserter(ABC):
         struggle for independence, green for forests, and gold for mineral wealth.
 
     """
+
+    def _get_prompt_modules(self) -> PromptMixinType:
+        """Get prompt sub-modules."""
+        return {}
 
     @abstractmethod
     def insert(
@@ -53,7 +59,7 @@ NOTE: the lookahead template may not be a complete sentence and may
 contain trailing/leading commas, etc. Please preserve the original
 formatting of the lookahead template if possible.
 
-NOTE: 
+NOTE:
 
 NOTE: the exception to the above rule is if the answer to a query
 is equivalent to "I don't know" or "I don't have an answer". In this case,
@@ -94,7 +100,7 @@ Synthesized Response:
 , the city contains a population of 8.4 million
 
 Previous Response:
-the city contains a population of 
+the city contains a population of
 
 Lookahead Template:
 [Search(What is the population of New York City?)]
@@ -117,7 +123,7 @@ Query-Answer Pairs:
 
 Synthesized Response:
 """
-DEFAULT_ANSWER_INSERT_PROMPT = Prompt(DEFAULT_ANSWER_INSERT_PROMPT_TMPL)
+DEFAULT_ANSWER_INSERT_PROMPT = PromptTemplate(DEFAULT_ANSWER_INSERT_PROMPT_TMPL)
 
 
 class LLMLookaheadAnswerInserter(BaseLookaheadAnswerInserter):
@@ -134,13 +140,24 @@ class LLMLookaheadAnswerInserter(BaseLookaheadAnswerInserter):
     def __init__(
         self,
         service_context: Optional[ServiceContext] = None,
-        answer_insert_prompt: Optional[Prompt] = None,
+        answer_insert_prompt: Optional[BasePromptTemplate] = None,
     ) -> None:
         """Init params."""
         self._service_context = service_context or ServiceContext.from_defaults()
         self._answer_insert_prompt = (
             answer_insert_prompt or DEFAULT_ANSWER_INSERT_PROMPT
         )
+
+    def _get_prompts(self) -> Dict[str, Any]:
+        """Get prompts."""
+        return {
+            "answer_insert_prompt": self._answer_insert_prompt,
+        }
+
+    def _update_prompts(self, prompts: PromptDictType) -> None:
+        """Update prompts."""
+        if "answer_insert_prompt" in prompts:
+            self._answer_insert_prompt = prompts["answer_insert_prompt"]
 
     def insert(
         self,
@@ -156,13 +173,12 @@ class LLMLookaheadAnswerInserter(BaseLookaheadAnswerInserter):
         for query_task, answer in zip(query_tasks, answers):
             query_answer_pairs += f"Query: {query_task.query_str}\nAnswer: {answer}\n"
 
-        response, fmt_prompt = self._service_context.llm_predictor.predict(
+        return self._service_context.llm.predict(
             self._answer_insert_prompt,
             lookahead_response=response,
             query_answer_pairs=query_answer_pairs,
             prev_response=prev_response,
         )
-        return response
 
 
 class DirectLookaheadAnswerInserter(BaseLookaheadAnswerInserter):
@@ -175,6 +191,13 @@ class DirectLookaheadAnswerInserter(BaseLookaheadAnswerInserter):
         service_context (ServiceContext): Service context.
 
     """
+
+    def _get_prompts(self) -> Dict[str, Any]:
+        """Get prompts."""
+        return {}
+
+    def _update_prompts(self, prompts: PromptDictType) -> None:
+        """Update prompts."""
 
     def insert(
         self,

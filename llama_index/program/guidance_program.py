@@ -1,14 +1,15 @@
-from typing import TYPE_CHECKING, Any, Optional, Type
+from functools import partial
+from typing import TYPE_CHECKING, Any, Optional, Type, cast
 
+from llama_index.bridge.pydantic import BaseModel
+from llama_index.program.llm_prompt_program import BaseLLMFunctionProgram
+from llama_index.prompts.base import PromptTemplate
 from llama_index.prompts.guidance_utils import (
     parse_pydantic_from_guidance_program,
-    pydantic_to_guidance_output_template_markdown,
 )
-from llama_index.program.llm_prompt_program import BaseLLMFunctionProgram
-from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from guidance.llms import LLM as GuidanceLLM
+    from guidance.models import Model as GuidanceLLM
 
 
 class GuidancePydanticProgram(BaseLLMFunctionProgram["GuidanceLLM"]):
@@ -26,32 +27,68 @@ class GuidancePydanticProgram(BaseLLMFunctionProgram["GuidanceLLM"]):
         verbose: bool = False,
     ):
         try:
-            from guidance import Program
-            from guidance.llms import OpenAI
+            from guidance.models import OpenAIChat
         except ImportError as e:
             raise ImportError(
                 "guidance package not found." "please run `pip install guidance`"
             ) from e
 
-        llm = guidance_llm or OpenAI("text-davinci-003")
-        output_str = pydantic_to_guidance_output_template_markdown(output_cls)
-        full_str = prompt_template_str + "\n" + output_str
+        if not guidance_llm:
+            llm = guidance_llm
+        else:
+            llm = OpenAIChat("gpt-3.5-turbo")
+
+        full_str = prompt_template_str + "\n"
         self._full_str = full_str
-        self._guidance_program = Program(full_str, llm=llm, silent=not verbose)
+        self._guidance_program = partial(self.program, llm=llm, silent=not verbose)
         self._output_cls = output_cls
         self._verbose = verbose
+
+    def program(
+        self,
+        llm: "GuidanceLLM",
+        silent: bool,
+        tools_str: str,
+        query_str: str,
+        **kwargs: dict,
+    ) -> "GuidanceLLM":
+        """A wrapper to execute the program with new guidance version."""
+        from guidance import assistant, gen, user
+
+        given_query = self._full_str.replace("{{tools_str}}", tools_str).replace(
+            "{{query_str}}", query_str
+        )
+        with user():
+            llm = llm + given_query
+
+        with assistant():
+            llm = llm + gen(stop=".")
+
+        return llm  # noqa: RET504
 
     @classmethod
     def from_defaults(
         cls,
-        # output_cls: Type[Model],
         output_cls: Type[BaseModel],
-        prompt_template_str: str,
+        prompt_template_str: Optional[str] = None,
+        prompt: Optional[PromptTemplate] = None,
         llm: Optional["GuidanceLLM"] = None,
         **kwargs: Any,
     ) -> "BaseLLMFunctionProgram":
         """From defaults."""
-        return cls(output_cls, prompt_template_str, guidance_llm=llm, **kwargs)
+        if prompt is None and prompt_template_str is None:
+            raise ValueError("Must provide either prompt or prompt_template_str.")
+        if prompt is not None and prompt_template_str is not None:
+            raise ValueError("Must provide either prompt or prompt_template_str.")
+        if prompt is not None:
+            prompt_template_str = prompt.template
+        prompt_template_str = cast(str, prompt_template_str)
+        return cls(
+            output_cls,
+            prompt_template_str,
+            guidance_llm=llm,
+            **kwargs,
+        )
 
     @property
     def output_cls(self) -> Type[BaseModel]:
@@ -63,8 +100,8 @@ class GuidancePydanticProgram(BaseLLMFunctionProgram["GuidanceLLM"]):
         **kwargs: Any,
     ) -> BaseModel:
         executed_program = self._guidance_program(**kwargs)
+        response = str(executed_program)
 
-        pydantic_obj = parse_pydantic_from_guidance_program(
-            program=executed_program, cls=self._output_cls
+        return parse_pydantic_from_guidance_program(
+            response=response, cls=self._output_cls
         )
-        return pydantic_obj

@@ -2,21 +2,30 @@ import logging
 from typing import Callable, List, Optional, Sequence
 
 from llama_index.async_utils import run_async_tasks
+from llama_index.bridge.pydantic import BaseModel
 from llama_index.callbacks.base import CallbackManager
 from llama_index.callbacks.schema import CBEventType, EventPayload
-from llama_index.indices.base_retriever import BaseRetriever
-from llama_index.indices.query.base import BaseQueryEngine
-from llama_index.indices.query.schema import QueryBundle
-from llama_index.indices.response.tree_summarize import TreeSummarize
-from llama_index.indices.service_context import ServiceContext
-from llama_index.prompts.default_prompts import DEFAULT_TEXT_QA_PROMPT
-from llama_index.response.schema import RESPONSE_TYPE
-from llama_index.selectors.llm_selectors import LLMMultiSelector, LLMSingleSelector
-from llama_index.selectors.types import BaseSelector
-from llama_index.schema import BaseNode
+from llama_index.core.base_query_engine import BaseQueryEngine
+from llama_index.core.base_retriever import BaseRetriever
+from llama_index.core.base_selector import BaseSelector
+from llama_index.core.response.schema import (
+    RESPONSE_TYPE,
+    PydanticResponse,
+    Response,
+    StreamingResponse,
+)
+from llama_index.objects.base import ObjectRetriever
+from llama_index.prompts.default_prompt_selectors import (
+    DEFAULT_TREE_SUMMARIZE_PROMPT_SEL,
+)
+from llama_index.prompts.mixin import PromptMixinType
+from llama_index.response_synthesizers import TreeSummarize
+from llama_index.schema import BaseNode, QueryBundle
+from llama_index.selectors.utils import get_selector_from_context
+from llama_index.service_context import ServiceContext
 from llama_index.tools.query_engine import QueryEngineTool
 from llama_index.tools.types import ToolMetadata
-from llama_index.objects.base import ObjectRetriever
+from llama_index.utils import print_text
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +37,23 @@ def combine_responses(
     logger.info("Combining responses from multiple query engines.")
 
     response_strs = []
+    source_nodes = []
     for response in responses:
+        if isinstance(response, (StreamingResponse, PydanticResponse)):
+            response_obj = response.get_response()
+        else:
+            response_obj = response
+        source_nodes.extend(response_obj.source_nodes)
         response_strs.append(str(response))
 
     summary = summarizer.get_response(query_bundle.query_str, response_strs)
 
-    return summary
+    if isinstance(summary, str):
+        return Response(response=summary, source_nodes=source_nodes)
+    elif isinstance(summary, BaseModel):
+        return PydanticResponse(response=summary, source_nodes=source_nodes)
+    else:
+        return StreamingResponse(response_gen=summary, source_nodes=source_nodes)
 
 
 async def acombine_responses(
@@ -43,12 +63,23 @@ async def acombine_responses(
     logger.info("Combining responses from multiple query engines.")
 
     response_strs = []
+    source_nodes = []
     for response in responses:
+        if isinstance(response, (StreamingResponse, PydanticResponse)):
+            response_obj = response.get_response()
+        else:
+            response_obj = response
+        source_nodes.extend(response_obj.source_nodes)
         response_strs.append(str(response))
 
     summary = await summarizer.aget_response(query_bundle.query_str, response_strs)
 
-    return summary
+    if isinstance(summary, str):
+        return Response(response=summary, source_nodes=source_nodes)
+    elif isinstance(summary, BaseModel):
+        return PydanticResponse(response=summary, source_nodes=source_nodes)
+    else:
+        return StreamingResponse(response_gen=summary, source_nodes=source_nodes)
 
 
 class RouterQueryEngine(BaseQueryEngine):
@@ -73,6 +104,7 @@ class RouterQueryEngine(BaseQueryEngine):
         query_engine_tools: Sequence[QueryEngineTool],
         service_context: Optional[ServiceContext] = None,
         summarizer: Optional[TreeSummarize] = None,
+        verbose: bool = False,
     ) -> None:
         self.service_context = service_context or ServiceContext.from_defaults()
         self._selector = selector
@@ -80,10 +112,16 @@ class RouterQueryEngine(BaseQueryEngine):
         self._metadatas = [x.metadata for x in query_engine_tools]
         self._summarizer = summarizer or TreeSummarize(
             service_context=self.service_context,
-            text_qa_template=DEFAULT_TEXT_QA_PROMPT,
+            summary_template=DEFAULT_TREE_SUMMARIZE_PROMPT_SEL,
         )
+        self._verbose = verbose
 
         super().__init__(self.service_context.callback_manager)
+
+    def _get_prompt_modules(self) -> PromptMixinType:
+        """Get prompt sub-modules."""
+        # NOTE: don't include tools for now
+        return {"summarizer": self._summarizer, "selector": self._selector}
 
     @classmethod
     def from_defaults(
@@ -94,10 +132,11 @@ class RouterQueryEngine(BaseQueryEngine):
         summarizer: Optional[TreeSummarize] = None,
         select_multi: bool = False,
     ) -> "RouterQueryEngine":
-        if selector is None and select_multi:
-            selector = LLMMultiSelector.from_defaults(service_context=service_context)
-        elif selector is None and not select_multi:
-            selector = LLMSingleSelector.from_defaults(service_context=service_context)
+        service_context = service_context or ServiceContext.from_defaults()
+
+        selector = selector or get_selector_from_context(
+            service_context, is_multi=select_multi
+        )
 
         assert selector is not None
 
@@ -109,80 +148,93 @@ class RouterQueryEngine(BaseQueryEngine):
         )
 
     def _query(self, query_bundle: QueryBundle) -> RESPONSE_TYPE:
-        event_id = self.callback_manager.on_event_start(
+        with self.callback_manager.event(
             CBEventType.QUERY, payload={EventPayload.QUERY_STR: query_bundle.query_str}
-        )
+        ) as query_event:
+            result = self._selector.select(self._metadatas, query_bundle)
 
-        result = self._selector.select(self._metadatas, query_bundle)
+            if len(result.inds) > 1:
+                responses = []
+                for i, engine_ind in enumerate(result.inds):
+                    log_str = (
+                        f"Selecting query engine {engine_ind}: " f"{result.reasons[i]}."
+                    )
+                    logger.info(log_str)
+                    if self._verbose:
+                        print_text(log_str + "\n", color="pink")
 
-        if len(result.inds) > 1:
-            responses = []
-            for i, engine_ind in enumerate(result.inds):
-                logger.info(
-                    f"Selecting query engine {engine_ind}: " f"{result.reasons[i]}."
-                )
-                selected_query_engine = self._query_engines[engine_ind]
-                responses.append(selected_query_engine.query(query_bundle))
+                    selected_query_engine = self._query_engines[engine_ind]
+                    responses.append(selected_query_engine.query(query_bundle))
 
-            if len(responses) > 1:
-                final_response = combine_responses(
-                    self._summarizer, responses, query_bundle
-                )
+                if len(responses) > 1:
+                    final_response = combine_responses(
+                        self._summarizer, responses, query_bundle
+                    )
+                else:
+                    final_response = responses[0]
             else:
-                final_response = responses[0]
-        else:
-            try:
-                selected_query_engine = self._query_engines[result.ind]
-                logger.info(f"Selecting query engine {result.ind}: {result.reason}.")
-            except ValueError as e:
-                raise ValueError("Failed to select query engine") from e
+                try:
+                    selected_query_engine = self._query_engines[result.ind]
+                    log_str = f"Selecting query engine {result.ind}: {result.reason}."
+                    logger.info(log_str)
+                    if self._verbose:
+                        print_text(log_str + "\n", color="pink")
+                except ValueError as e:
+                    raise ValueError("Failed to select query engine") from e
 
-            final_response = selected_query_engine.query(query_bundle)
+                final_response = selected_query_engine.query(query_bundle)
 
-        self.callback_manager.on_event_end(
-            CBEventType.QUERY,
-            payload={EventPayload.RESPONSE: final_response},
-            event_id=event_id,
-        )
+            # add selected result
+            final_response.metadata = final_response.metadata or {}
+            final_response.metadata["selector_result"] = result
+
+            query_event.on_end(payload={EventPayload.RESPONSE: final_response})
+
         return final_response
 
     async def _aquery(self, query_bundle: QueryBundle) -> RESPONSE_TYPE:
-        event_id = self.callback_manager.on_event_start(
+        with self.callback_manager.event(
             CBEventType.QUERY, payload={EventPayload.QUERY_STR: query_bundle.query_str}
-        )
+        ) as query_event:
+            result = await self._selector.aselect(self._metadatas, query_bundle)
 
-        result = await self._selector.aselect(self._metadatas, query_bundle)
+            if len(result.inds) > 1:
+                tasks = []
+                for i, engine_ind in enumerate(result.inds):
+                    log_str = (
+                        f"Selecting query engine {engine_ind}: " f"{result.reasons[i]}."
+                    )
+                    logger.info(log_str)
+                    if self._verbose:
+                        print_text(log_str + "\n", color="pink")
+                    selected_query_engine = self._query_engines[engine_ind]
+                    tasks.append(selected_query_engine.aquery(query_bundle))
 
-        if len(result.inds) > 1:
-            tasks = []
-            for i, engine_ind in enumerate(result.inds):
-                logger.info(
-                    f"Selecting query engine {engine_ind}: " f"{result.reasons[i]}."
-                )
-                selected_query_engine = self._query_engines[engine_ind]
-                tasks.append(selected_query_engine.aquery(query_bundle))
-
-            responses = run_async_tasks(tasks)
-            if len(responses) > 1:
-                final_response = await acombine_responses(
-                    self._summarizer, responses, query_bundle
-                )
+                responses = run_async_tasks(tasks)
+                if len(responses) > 1:
+                    final_response = await acombine_responses(
+                        self._summarizer, responses, query_bundle
+                    )
+                else:
+                    final_response = responses[0]
             else:
-                final_response = responses[0]
-        else:
-            try:
-                selected_query_engine = self._query_engines[result.ind]
-                logger.info(f"Selecting query engine {result.ind}: {result.reason}.")
-            except ValueError as e:
-                raise ValueError("Failed to select query engine") from e
+                try:
+                    selected_query_engine = self._query_engines[result.ind]
+                    log_str = f"Selecting query engine {result.ind}: {result.reason}."
+                    logger.info(log_str)
+                    if self._verbose:
+                        print_text(log_str + "\n", color="pink")
+                except ValueError as e:
+                    raise ValueError("Failed to select query engine") from e
 
-            final_response = await selected_query_engine.aquery(query_bundle)
+                final_response = await selected_query_engine.aquery(query_bundle)
 
-        self.callback_manager.on_event_end(
-            CBEventType.QUERY,
-            payload={EventPayload.RESPONSE: final_response},
-            event_id=event_id,
-        )
+            # add selected result
+            final_response.metadata = final_response.metadata or {}
+            final_response.metadata["selector_result"] = result
+
+            query_event.on_end(payload={EventPayload.RESPONSE: final_response})
+
         return final_response
 
 
@@ -192,7 +244,6 @@ def default_node_to_metadata_fn(node: BaseNode) -> ToolMetadata:
     We use the node's text as the Tool description.
 
     """
-
     metadata = node.metadata or {}
     if "tool_name" not in metadata:
         raise ValueError("Node must have a tool_name in metadata.")
@@ -231,6 +282,11 @@ class RetrieverRouterQueryEngine(BaseQueryEngine):
         self._node_to_query_engine_fn = node_to_query_engine_fn
         super().__init__(callback_manager)
 
+    def _get_prompt_modules(self) -> PromptMixinType:
+        """Get prompt sub-modules."""
+        # NOTE: don't include tools for now
+        return {"retriever": self._retriever}
+
     def _query(self, query_bundle: QueryBundle) -> RESPONSE_TYPE:
         nodes_with_score = self._retriever.retrieve(query_bundle)
         # TODO: for now we only support retrieving one node
@@ -267,59 +323,63 @@ class ToolRetrieverRouterQueryEngine(BaseQueryEngine):
         self.service_context = service_context or ServiceContext.from_defaults()
         self._summarizer = summarizer or TreeSummarize(
             service_context=self.service_context,
-            text_qa_template=DEFAULT_TEXT_QA_PROMPT,
+            summary_template=DEFAULT_TREE_SUMMARIZE_PROMPT_SEL,
         )
         self._retriever = retriever
 
         super().__init__(self.service_context.callback_manager)
 
+    def _get_prompt_modules(self) -> PromptMixinType:
+        """Get prompt sub-modules."""
+        # NOTE: don't include tools for now
+        return {"summarizer": self._summarizer}
+
     def _query(self, query_bundle: QueryBundle) -> RESPONSE_TYPE:
-        event_id = self.callback_manager.on_event_start(
+        with self.callback_manager.event(
             CBEventType.QUERY, payload={EventPayload.QUERY_STR: query_bundle.query_str}
-        )
+        ) as query_event:
+            query_engine_tools = self._retriever.retrieve(query_bundle)
+            responses = []
+            for query_engine_tool in query_engine_tools:
+                query_engine = query_engine_tool.query_engine
+                responses.append(query_engine.query(query_bundle))
 
-        query_engine_tools = self._retriever.retrieve(query_bundle)
-        responses = []
-        for query_engine_tool in query_engine_tools:
-            query_engine = query_engine_tool.query_engine
-            responses.append(query_engine.query(query_bundle))
+            if len(responses) > 1:
+                final_response = combine_responses(
+                    self._summarizer, responses, query_bundle
+                )
+            else:
+                final_response = responses[0]
 
-        if len(responses) > 1:
-            final_response = combine_responses(
-                self._summarizer, responses, query_bundle
-            )
-        else:
-            final_response = responses[0]
+            # add selected result
+            final_response.metadata = final_response.metadata or {}
+            final_response.metadata["retrieved_tools"] = query_engine_tools
 
-        self.callback_manager.on_event_end(
-            CBEventType.QUERY,
-            payload={EventPayload.RESPONSE: final_response},
-            event_id=event_id,
-        )
+            query_event.on_end(payload={EventPayload.RESPONSE: final_response})
+
         return final_response
 
     async def _aquery(self, query_bundle: QueryBundle) -> RESPONSE_TYPE:
-        event_id = self.callback_manager.on_event_start(
+        with self.callback_manager.event(
             CBEventType.QUERY, payload={EventPayload.QUERY_STR: query_bundle.query_str}
-        )
+        ) as query_event:
+            query_engine_tools = self._retriever.retrieve(query_bundle)
+            tasks = []
+            for query_engine_tool in query_engine_tools:
+                query_engine = query_engine_tool.query_engine
+                tasks.append(query_engine.aquery(query_bundle))
+            responses = run_async_tasks(tasks)
+            if len(responses) > 1:
+                final_response = await acombine_responses(
+                    self._summarizer, responses, query_bundle
+                )
+            else:
+                final_response = responses[0]
 
-        query_engine_tools = self._retriever.retrieve(query_bundle)
-        tasks = []
-        for query_engine_tool in query_engine_tools:
-            query_engine = query_engine_tool.query_engine
-            tasks.append(query_engine.aquery(query_bundle))
-        responses = run_async_tasks(tasks)
-        if len(responses) > 1:
-            final_response = await acombine_responses(
-                self._summarizer, responses, query_bundle
-            )
-        else:
-            final_response = responses[0]
+            # add selected result
+            final_response.metadata = final_response.metadata or {}
+            final_response.metadata["retrieved_tools"] = query_engine_tools
 
-        self.callback_manager.on_event_end(
-            CBEventType.QUERY,
-            payload={EventPayload.RESPONSE: final_response},
-            event_id=event_id,
-        )
+            query_event.on_end(payload={EventPayload.RESPONSE: final_response})
 
         return final_response

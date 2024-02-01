@@ -1,4 +1,4 @@
-"""List index.
+"""Summary index.
 
 A simple data structure where LlamaIndex iterates through document chunks
 in sequence in order to answer a given query.
@@ -8,12 +8,13 @@ in sequence in order to answer a given query.
 from enum import Enum
 from typing import Any, Dict, Optional, Sequence, Union
 
+from llama_index.core.base_retriever import BaseRetriever
 from llama_index.data_structs.data_structs import IndexList
 from llama_index.indices.base import BaseIndex
-from llama_index.indices.base_retriever import BaseRetriever
-from llama_index.indices.service_context import ServiceContext
-from llama_index.schema import BaseNode
+from llama_index.schema import BaseNode, IndexNode
+from llama_index.service_context import ServiceContext
 from llama_index.storage.docstore.types import RefDocInfo
+from llama_index.utils import get_tqdm_iterable
 
 
 class ListRetrieverMode(str, Enum):
@@ -22,21 +23,22 @@ class ListRetrieverMode(str, Enum):
     LLM = "llm"
 
 
-class ListIndex(BaseIndex[IndexList]):
-    """List Index.
+class SummaryIndex(BaseIndex[IndexList]):
+    """Summary Index.
 
-    The list index is a simple data structure where nodes are stored in
+    The summary index is a simple data structure where nodes are stored in
     a sequence. During index construction, the document texts are
     chunked up, converted to nodes, and stored in a list.
 
-    During query time, the list index iterates through the nodes
+    During query time, the summary index iterates through the nodes
     with some optional filter parameters, and synthesizes an
     answer from all the nodes.
 
     Args:
-        text_qa_template (Optional[QuestionAnswerPrompt]): A Question-Answer Prompt
+        text_qa_template (Optional[BasePromptTemplate]): A Question-Answer Prompt
             (see :ref:`Prompt-Templates`).
             NOTE: this is a deprecated field.
+        show_progress (bool): Whether to show tqdm progress bars. Defaults to False.
 
     """
 
@@ -45,8 +47,10 @@ class ListIndex(BaseIndex[IndexList]):
     def __init__(
         self,
         nodes: Optional[Sequence[BaseNode]] = None,
+        objects: Optional[Sequence[IndexNode]] = None,
         index_struct: Optional[IndexList] = None,
         service_context: Optional[ServiceContext] = None,
+        show_progress: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize params."""
@@ -54,6 +58,8 @@ class ListIndex(BaseIndex[IndexList]):
             nodes=nodes,
             index_struct=index_struct,
             service_context=service_context,
+            show_progress=show_progress,
+            objects=objects,
             **kwargs,
         )
 
@@ -63,31 +69,38 @@ class ListIndex(BaseIndex[IndexList]):
         **kwargs: Any,
     ) -> BaseRetriever:
         from llama_index.indices.list.retrievers import (
-            ListIndexEmbeddingRetriever,
-            ListIndexLLMRetriever,
-            ListIndexRetriever,
+            SummaryIndexEmbeddingRetriever,
+            SummaryIndexLLMRetriever,
+            SummaryIndexRetriever,
         )
 
         if retriever_mode == ListRetrieverMode.DEFAULT:
-            return ListIndexRetriever(self, **kwargs)
+            return SummaryIndexRetriever(self, object_map=self._object_map, **kwargs)
         elif retriever_mode == ListRetrieverMode.EMBEDDING:
-            return ListIndexEmbeddingRetriever(self, **kwargs)
+            return SummaryIndexEmbeddingRetriever(
+                self, object_map=self._object_map, **kwargs
+            )
         elif retriever_mode == ListRetrieverMode.LLM:
-            return ListIndexLLMRetriever(self, **kwargs)
+            return SummaryIndexLLMRetriever(self, object_map=self._object_map, **kwargs)
         else:
             raise ValueError(f"Unknown retriever mode: {retriever_mode}")
 
-    def _build_index_from_nodes(self, nodes: Sequence[BaseNode]) -> IndexList:
+    def _build_index_from_nodes(
+        self, nodes: Sequence[BaseNode], show_progress: bool = False
+    ) -> IndexList:
         """Build the index from documents.
 
         Args:
             documents (List[BaseDocument]): A list of documents.
 
         Returns:
-            IndexList: The created list index.
+            IndexList: The created summary index.
         """
         index_struct = IndexList()
-        for n in nodes:
+        nodes_with_progress = get_tqdm_iterable(
+            nodes, show_progress, "Processing nodes"
+        )
+        for n in nodes_with_progress:
             index_struct.add_node(n)
         return index_struct
 
@@ -124,4 +137,7 @@ class ListIndex(BaseIndex[IndexList]):
 
 
 # Legacy
-GPTListIndex = ListIndex
+GPTListIndex = SummaryIndex
+
+# New name
+ListIndex = SummaryIndex

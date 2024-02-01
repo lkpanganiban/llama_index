@@ -13,18 +13,19 @@ from enum import Enum
 from typing import Any, Dict, Optional, Sequence, Set, Union
 
 from llama_index.async_utils import run_async_tasks
+from llama_index.core.base_retriever import BaseRetriever
 from llama_index.data_structs.data_structs import KeywordTable
 from llama_index.indices.base import BaseIndex
-from llama_index.indices.base_retriever import BaseRetriever
 from llama_index.indices.keyword_table.utils import extract_keywords_given_response
-from llama_index.indices.service_context import ServiceContext
+from llama_index.prompts import BasePromptTemplate
 from llama_index.prompts.default_prompts import (
     DEFAULT_KEYWORD_EXTRACT_TEMPLATE,
     DEFAULT_QUERY_KEYWORD_EXTRACT_TEMPLATE,
 )
-from llama_index.prompts.prompts import KeywordExtractPrompt
-from llama_index.schema import BaseNode, MetadataMode
+from llama_index.schema import BaseNode, IndexNode, MetadataMode
+from llama_index.service_context import ServiceContext
 from llama_index.storage.docstore.types import RefDocInfo
+from llama_index.utils import get_tqdm_iterable
 
 DQKET = DEFAULT_QUERY_KEYWORD_EXTRACT_TEMPLATE
 
@@ -39,7 +40,7 @@ class BaseKeywordTableIndex(BaseIndex[KeywordTable]):
     """Base Keyword Table Index.
 
     This index extracts keywords from the text, and maps each
-    keyword to the node(s) that it corresponds to. In this sense it mimicks a
+    keyword to the node(s) that it corresponds to. In this sense it mimics a
     "hash table". During index construction, the keyword table is constructed
     by extracting keywords from each node and creating an internal mapping.
 
@@ -48,10 +49,11 @@ class BaseKeywordTableIndex(BaseIndex[KeywordTable]):
     are then used to answer the query.
 
     Args:
-        keyword_extract_template (Optional[KeywordExtractPrompt]): A Keyword
+        keyword_extract_template (Optional[BasePromptTemplate]): A Keyword
             Extraction Prompt
             (see :ref:`Prompt-Templates`).
         use_async (bool): Whether to use asynchronous calls. Defaults to False.
+        show_progress (bool): Whether to show tqdm progress bars. Defaults to False.
 
     """
 
@@ -60,11 +62,13 @@ class BaseKeywordTableIndex(BaseIndex[KeywordTable]):
     def __init__(
         self,
         nodes: Optional[Sequence[BaseNode]] = None,
+        objects: Optional[Sequence[IndexNode]] = None,
         index_struct: Optional[KeywordTable] = None,
         service_context: Optional[ServiceContext] = None,
-        keyword_extract_template: Optional[KeywordExtractPrompt] = None,
+        keyword_extract_template: Optional[BasePromptTemplate] = None,
         max_keywords_per_chunk: int = 10,
         use_async: bool = False,
+        show_progress: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize params."""
@@ -82,6 +86,8 @@ class BaseKeywordTableIndex(BaseIndex[KeywordTable]):
             nodes=nodes,
             index_struct=index_struct,
             service_context=service_context,
+            show_progress=show_progress,
+            objects=objects,
             **kwargs,
         )
 
@@ -100,11 +106,15 @@ class BaseKeywordTableIndex(BaseIndex[KeywordTable]):
         )
 
         if retriever_mode == KeywordTableRetrieverMode.DEFAULT:
-            return KeywordTableGPTRetriever(self, **kwargs)
+            return KeywordTableGPTRetriever(self, object_map=self._object_map, **kwargs)
         elif retriever_mode == KeywordTableRetrieverMode.SIMPLE:
-            return KeywordTableSimpleRetriever(self, **kwargs)
+            return KeywordTableSimpleRetriever(
+                self, object_map=self._object_map, **kwargs
+            )
         elif retriever_mode == KeywordTableRetrieverMode.RAKE:
-            return KeywordTableRAKERetriever(self, **kwargs)
+            return KeywordTableRAKERetriever(
+                self, object_map=self._object_map, **kwargs
+            )
         else:
             raise ValueError(f"Unknown retriever mode: {retriever_mode}")
 
@@ -118,20 +128,32 @@ class BaseKeywordTableIndex(BaseIndex[KeywordTable]):
         return self._extract_keywords(text)
 
     def _add_nodes_to_index(
-        self, index_struct: KeywordTable, nodes: Sequence[BaseNode]
+        self,
+        index_struct: KeywordTable,
+        nodes: Sequence[BaseNode],
+        show_progress: bool = False,
     ) -> None:
         """Add document to index."""
-        for n in nodes:
+        nodes_with_progress = get_tqdm_iterable(
+            nodes, show_progress, "Extracting keywords from nodes"
+        )
+        for n in nodes_with_progress:
             keywords = self._extract_keywords(
                 n.get_content(metadata_mode=MetadataMode.LLM)
             )
             index_struct.add_node(list(keywords), n)
 
     async def _async_add_nodes_to_index(
-        self, index_struct: KeywordTable, nodes: Sequence[BaseNode]
+        self,
+        index_struct: KeywordTable,
+        nodes: Sequence[BaseNode],
+        show_progress: bool = False,
     ) -> None:
         """Add document to index."""
-        for n in nodes:
+        nodes_with_progress = get_tqdm_iterable(
+            nodes, show_progress, "Extracting keywords from nodes"
+        )
+        for n in nodes_with_progress:
             keywords = await self._async_extract_keywords(
                 n.get_content(metadata_mode=MetadataMode.LLM)
             )
@@ -142,10 +164,12 @@ class BaseKeywordTableIndex(BaseIndex[KeywordTable]):
         # do simple concatenation
         index_struct = KeywordTable(table={})
         if self._use_async:
-            tasks = [self._async_add_nodes_to_index(index_struct, nodes)]
+            tasks = [
+                self._async_add_nodes_to_index(index_struct, nodes, self._show_progress)
+            ]
             run_async_tasks(tasks)
         else:
-            self._add_nodes_to_index(index_struct, nodes)
+            self._add_nodes_to_index(index_struct, nodes, self._show_progress)
 
         return index_struct
 
@@ -201,21 +225,19 @@ class KeywordTableIndex(BaseKeywordTableIndex):
 
     def _extract_keywords(self, text: str) -> Set[str]:
         """Extract keywords from text."""
-        response, formatted_prompt = self._service_context.llm_predictor.predict(
+        response = self._service_context.llm.predict(
             self.keyword_extract_template,
             text=text,
         )
-        keywords = extract_keywords_given_response(response, start_token="KEYWORDS:")
-        return keywords
+        return extract_keywords_given_response(response, start_token="KEYWORDS:")
 
     async def _async_extract_keywords(self, text: str) -> Set[str]:
         """Extract keywords from text."""
-        response, formatted_prompt = await self._service_context.llm_predictor.apredict(
+        response = await self._service_context.llm.apredict(
             self.keyword_extract_template,
             text=text,
         )
-        keywords = extract_keywords_given_response(response, start_token="KEYWORDS:")
-        return keywords
+        return extract_keywords_given_response(response, start_token="KEYWORDS:")
 
 
 # legacy

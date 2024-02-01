@@ -5,9 +5,9 @@ from typing import Any, Optional, Sequence
 
 import pandas as pd
 
+from llama_index.core.base_query_engine import BaseQueryEngine
+from llama_index.core.base_retriever import BaseRetriever
 from llama_index.data_structs.table import PandasStructTable
-from llama_index.indices.base_retriever import BaseRetriever
-from llama_index.indices.query.base import BaseQueryEngine
 from llama_index.indices.struct_store.base import BaseStructStoreIndex
 from llama_index.schema import BaseNode
 
@@ -62,14 +62,15 @@ class PandasIndex(BaseStructStoreIndex[PandasStructTable]):
 
     def as_query_engine(self, **kwargs: Any) -> BaseQueryEngine:
         # NOTE: lazy import
-        from llama_index.query_engine.pandas_query_engine import PandasQueryEngine
+        from llama_index.query_engine.pandas.pandas_query_engine import (
+            PandasQueryEngine,
+        )
 
         return PandasQueryEngine.from_index(self, **kwargs)
 
     def _build_index_from_nodes(self, nodes: Sequence[BaseNode]) -> PandasStructTable:
         """Build index from documents."""
-        index_struct = self.index_struct_cls()
-        return index_struct
+        return self.index_struct_cls()
 
     def _insert(self, nodes: Sequence[BaseNode], **insert_kwargs: Any) -> None:
         """Insert a document."""

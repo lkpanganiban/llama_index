@@ -1,13 +1,13 @@
 """Slack tool spec."""
 
-from llama_index.tools.tool_spec.base import BaseToolSpec
+import logging
+from datetime import datetime
+from ssl import SSLContext
+from typing import List, Optional
+
 from llama_index.readers.slack import SlackReader
 from llama_index.schema import Document
-from typing import Optional, List, Type
-from pydantic import BaseModel
-import logging
-from ssl import SSLContext
-from datetime import datetime
+from llama_index.tools.tool_spec.base import BaseToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +31,6 @@ class SlackToolSpec(BaseToolSpec):
             earliest_date=earliest_date,
             latest_date=latest_date,
         )
-
-    def get_fn_schema_from_fn_name(self, fn_name: str) -> Optional[Type[BaseModel]]:
-        """Return map from function name."""
-        return None
 
     def load_data(
         self,
@@ -62,7 +58,7 @@ class SlackToolSpec(BaseToolSpec):
             logger.info(msg_result)
         except Exception as e:
             logger.error(e)
-            raise e
+            raise
 
     def fetch_channels(
         self,
@@ -74,6 +70,6 @@ class SlackToolSpec(BaseToolSpec):
             logger.info(msg_result)
         except Exception as e:
             logger.error(e)
-            raise e
+            raise
 
         return msg_result["channels"]

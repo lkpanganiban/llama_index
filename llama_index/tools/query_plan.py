@@ -1,15 +1,12 @@
 """Query plan tool."""
 
-from llama_index.bridge.langchain import print_text
-from pydantic import BaseModel, Field
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
 
-from llama_index.indices.query.response_synthesis import ResponseSynthesizer
-from llama_index.indices.query.schema import QueryBundle
+from llama_index.bridge.pydantic import BaseModel, Field
+from llama_index.response_synthesizers import BaseSynthesizer, get_response_synthesizer
 from llama_index.schema import NodeWithScore, TextNode
-from llama_index.tools.types import BaseTool
-from llama_index.tools.types import ToolMetadata
-
+from llama_index.tools.types import BaseTool, ToolMetadata, ToolOutput
+from llama_index.utils import print_text
 
 DEFAULT_NAME = "query_plan_tool"
 
@@ -89,7 +86,7 @@ class QueryPlanTool(BaseTool):
     def __init__(
         self,
         query_engine_tools: List[BaseTool],
-        response_synthesizer: ResponseSynthesizer,
+        response_synthesizer: BaseSynthesizer,
         name: str,
         description_prefix: str,
     ) -> None:
@@ -103,15 +100,15 @@ class QueryPlanTool(BaseTool):
     def from_defaults(
         cls,
         query_engine_tools: List[BaseTool],
-        response_synthesizer: Optional[ResponseSynthesizer] = None,
+        response_synthesizer: Optional[BaseSynthesizer] = None,
         name: Optional[str] = None,
         description_prefix: Optional[str] = None,
     ) -> "QueryPlanTool":
         """Initialize from defaults."""
         name = name or DEFAULT_NAME
         description_prefix = description_prefix or DEFAULT_DESCRIPTION_PREFIX
-        if response_synthesizer is None:
-            response_synthesizer = ResponseSynthesizer.from_args()
+        response_synthesizer = response_synthesizer or get_response_synthesizer()
+
         return cls(
             query_engine_tools=query_engine_tools,
             response_synthesizer=response_synthesizer,
@@ -134,11 +131,11 @@ class QueryPlanTool(BaseTool):
         {self._description_prefix}\n\n
         {tools_description}
         """
-        metadata = ToolMetadata(description, self._name, fn_schema=QueryPlan)
+        return ToolMetadata(description, self._name, fn_schema=QueryPlan)
 
-        return metadata
-
-    def _execute_node(self, node: QueryNode, nodes_dict: Dict[int, QueryNode]) -> str:
+    def _execute_node(
+        self, node: QueryNode, nodes_dict: Dict[int, QueryNode]
+    ) -> ToolOutput:
         """Execute node."""
         print_text(f"Executing node {node.json()}\n", color="blue")
         if len(node.dependencies) > 0:
@@ -149,7 +146,7 @@ class QueryPlanTool(BaseTool):
                 nodes_dict[dep] for dep in node.dependencies
             ]
             # execute the child nodes first
-            child_responses: List[str] = [
+            child_responses: List[ToolOutput] = [
                 self._execute_node(child, nodes_dict) for child in child_query_nodes
             ]
             # form the child Node/NodeWithScore objects
@@ -159,19 +156,24 @@ class QueryPlanTool(BaseTool):
             ):
                 node_text = (
                     f"Query: {child_query_node.query_str}\n"
-                    f"Response: {child_response}\n"
+                    f"Response: {child_response!s}\n"
                 )
                 child_node = TextNode(text=node_text)
                 child_nodes.append(child_node)
-            # use ResponseSynthesizer to combine results
+            # use response synthesizer to combine results
             child_nodes_with_scores = [
                 NodeWithScore(node=n, score=1.0) for n in child_nodes
             ]
             response_obj = self._response_synthesizer.synthesize(
-                query_bundle=QueryBundle(node.query_str),
+                query=node.query_str,
                 nodes=child_nodes_with_scores,
             )
-            response = str(response_obj)
+            response = ToolOutput(
+                content=str(response_obj),
+                tool_name=node.query_str,
+                raw_input={"query": node.query_str},
+                raw_output=response_obj,
+            )
 
         else:
             # this is a leaf request, execute the query string using the specified tool
@@ -181,7 +183,7 @@ class QueryPlanTool(BaseTool):
         print_text(
             "Executed query, got response.\n"
             f"Query: {node.query_str}\n"
-            f"Response: {response}\n",
+            f"Response: {response!s}\n",
             color="blue",
         )
         return response
@@ -189,7 +191,7 @@ class QueryPlanTool(BaseTool):
     def _find_root_nodes(self, nodes_dict: Dict[int, QueryNode]) -> List[QueryNode]:
         """Find root node."""
         # the root node is the one that isn't a dependency of any other node
-        node_counts = {node_id: 0 for node_id in nodes_dict.keys()}
+        node_counts = {node_id: 0 for node_id in nodes_dict}
         for node in nodes_dict.values():
             for dep in node.dependencies:
                 node_counts[dep] += 1
@@ -198,7 +200,7 @@ class QueryPlanTool(BaseTool):
         ]
         return [nodes_dict[node_id] for node_id in root_node_ids]
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> ToolOutput:
         """Call."""
         # the kwargs represented as a JSON object
         # should be a QueryPlan object

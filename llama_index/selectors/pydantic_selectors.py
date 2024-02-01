@@ -1,23 +1,22 @@
-from llama_index.bridge.langchain import ChatOpenAI
-from typing import Any, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
-from llama_index.indices.query.schema import QueryBundle
-from llama_index.program.openai_program import (
-    OpenAIPydanticProgram,
+from llama_index.core.base_selector import (
+    BaseSelector,
+    MultiSelection,
+    SelectorResult,
+    SingleSelection,
 )
-from llama_index.program.base_program import BasePydanticProgram
+from llama_index.llms.openai import OpenAI
+from llama_index.program.openai_program import OpenAIPydanticProgram
+from llama_index.prompts.mixin import PromptDictType
+from llama_index.schema import QueryBundle
 from llama_index.selectors.llm_selectors import _build_choices_text
 from llama_index.selectors.prompts import (
     DEFAULT_MULTI_PYD_SELECT_PROMPT_TMPL,
     DEFAULT_SINGLE_PYD_SELECT_PROMPT_TMPL,
 )
-from llama_index.selectors.types import (
-    BaseSelector,
-    SelectorResult,
-    MultiSelection,
-    SingleSelection,
-)
 from llama_index.tools.types import ToolMetadata
+from llama_index.types import BasePydanticProgram
 
 
 def _pydantic_output_to_selector_result(output: Any) -> SelectorResult:
@@ -44,7 +43,7 @@ class PydanticSingleSelector(BaseSelector):
     def from_defaults(
         cls,
         program: Optional[BasePydanticProgram] = None,
-        llm: Optional[ChatOpenAI] = None,
+        llm: Optional[OpenAI] = None,
         prompt_template_str: str = DEFAULT_SINGLE_PYD_SELECT_PROMPT_TMPL,
         verbose: bool = False,
     ) -> "PydanticSingleSelector":
@@ -57,6 +56,14 @@ class PydanticSingleSelector(BaseSelector):
             )
 
         return cls(selector_program=program)
+
+    def _get_prompts(self) -> Dict[str, Any]:
+        """Get prompts."""
+        # TODO: no accessible prompts for a base pydantic program
+        return {}
+
+    def _update_prompts(self, prompts: PromptDictType) -> None:
+        """Update prompts."""
 
     def _select(
         self, choices: Sequence[ToolMetadata], query: QueryBundle
@@ -93,7 +100,7 @@ class PydanticMultiSelector(BaseSelector):
     def from_defaults(
         cls,
         program: Optional[BasePydanticProgram] = None,
-        llm: Optional[ChatOpenAI] = None,
+        llm: Optional[OpenAI] = None,
         prompt_template_str: str = DEFAULT_MULTI_PYD_SELECT_PROMPT_TMPL,
         max_outputs: Optional[int] = None,
         verbose: bool = False,
@@ -107,6 +114,14 @@ class PydanticMultiSelector(BaseSelector):
             )
 
         return cls(selector_program=program, max_outputs=max_outputs)
+
+    def _get_prompts(self) -> Dict[str, Any]:
+        """Get prompts."""
+        # TODO: no accessible prompts for a base pydantic program
+        return {}
+
+    def _update_prompts(self, prompts: PromptDictType) -> None:
+        """Update prompts."""
 
     def _select(
         self, choices: Sequence[ToolMetadata], query: QueryBundle
@@ -129,6 +144,4 @@ class PydanticMultiSelector(BaseSelector):
     async def _aselect(
         self, choices: Sequence[ToolMetadata], query: QueryBundle
     ) -> SelectorResult:
-        raise NotImplementedError(
-            "Async selection not supported for Pydantic Selectors."
-        )
+        return self._select(choices, query)

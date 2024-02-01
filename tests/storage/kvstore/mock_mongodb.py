@@ -1,7 +1,7 @@
+import uuid
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 from unittest.mock import Mock
-import uuid
 
 
 class MockMongoCollection:
@@ -37,8 +37,7 @@ class MockMongoCollection:
         elif upsert:
             self.insert_one(obj)
 
-        update_result = Mock()
-        return update_result
+        return Mock()
 
     def insert_one(self, obj: dict, _id: Optional[str] = None) -> Any:
         _id = _id or obj.get("_id", None) or str(uuid.uuid4())
@@ -66,6 +65,12 @@ class MockMongoCollection:
         insert_result = Mock()
         insert_result.inserted_ids = inserted_ids
         return insert_result
+
+    def bulk_write(self, operations: List[Any]) -> Any:
+        for operation in operations:
+            obj = operation._doc["$set"]
+            _id = obj.pop("_id")
+            self.insert_one(obj, _id)
 
 
 class MockMongoDB:
